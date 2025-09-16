@@ -20,10 +20,16 @@ if __name__ == '__main__':
     model_fp = f'{model_dir}/best/best-data507-timestep20.tar'
     model.load_state_dict(torch.load(model_fp, map_location=device))
 
+    # Print model.M shape
+    print("Model mass matrix shape:", model.M.shape)
+    print("Model inertia matrix shape:", model.J.shape)
+
     # Load the data
     print("Loading the data ...")
     norm_params = torch.load(f'{model_dir}/norm_params.pth')
-    test_data = get_test_data(args.eval_data_fp, norm_params, args.timesteps, args.test_sample_interval)
+    # test_data = get_test_data(args.eval_data_fp, norm_params, args.timesteps, args.test_sample_interval)
+    test_data = torch.load(args.eval_data_fp, map_location='cpu', weights_only=False)
+    test_data = test_data['val_data']
     test_data = test_data.clone().detach().to(dtype=torch.float64, device=device).requires_grad_(False)
     x0 = test_data[0, :, :]
     u = test_data[:,:, -3:]
