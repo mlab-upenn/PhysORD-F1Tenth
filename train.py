@@ -43,7 +43,7 @@ def train(args, train_data, val_data):
 
     # model
     print("Creating model ...")
-    model = PhysORD(device=device, use_dVNet = True, time_step = 0.1, udim=3).to(device)
+    model = PhysORD(device=device, use_dVNet = True, time_step = 0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
     if args.pretrained is not None:
         print("loading pretrained model")
         model.load_state_dict(torch.load(args.pretrained, map_location=device))
@@ -152,7 +152,9 @@ if __name__ == "__main__":
     parser.add_argument('--save_every', default=1000, type=int, help='number of save steps')
     parser.add_argument('--seed', default=0, type=int, help='random seed')
     parser.add_argument('--gpu', type=int, default=0)
-    parser.set_defaults(feature=True)
+    parser.add_argument('--use_v_gap', dest='use_v_gap', action='store_true', help='whether to include v_gap (RPM difference) as input to the model')
+    parser.add_argument('--no_v_gap', dest='use_v_gap', action='store_false', help='exclude v_gap (RPM difference) from model input')
+    parser.set_defaults(feature=True, use_v_gap=True)
     args = parser.parse_args()
     device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
 

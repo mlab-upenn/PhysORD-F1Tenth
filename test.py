@@ -9,14 +9,18 @@ if __name__ == '__main__':
     parser.add_argument('--eval_data_fp', type=str, required=False, default='/data/data0/datasets/tartandrive/data/test-hard/', help='Path to test data')
     parser.add_argument('--timesteps', type=int, required=False, default=20, help='Number of timesteps to predict')
     parser.add_argument('--test_sample_interval', type=int, default=1, help='test data sample interval')
+    parser.add_argument('--model_root_dir', type=str, required=False, default='./pretrained', help='root folder with model')
+    parser.add_argument('--use_v_gap', dest='use_v_gap', action='store_true', help='whether to include v_gap (RPM difference) as input to the model')
+    parser.add_argument('--no_v_gap', dest='use_v_gap', action='store_false', help='exclude v_gap (RPM difference) from model input')
+    parser.set_defaults(use_v_gap=True)
 
     args = parser.parse_args()
     device = torch.device('cuda:' + str(0) if torch.cuda.is_available() else 'cpu')
 
     # Load the model
     print("Loading the model ...")
-    model = PhysORD(device=device, use_dVNet = True, time_step = 0.1).to(device)
-    model_dir = f'./pretrained/{args.exp_name}'
+    model = PhysORD(device=device, use_dVNet = True, time_step = 0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
+    model_dir = f'./{args.model_root_dir}/{args.exp_name}'
     model_fp = f'{model_dir}/best/best-data507-timestep20.tar'
     model.load_state_dict(torch.load(model_fp, map_location=device))
 

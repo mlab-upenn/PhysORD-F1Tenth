@@ -5,7 +5,7 @@ from physord.nn_models import MLP, FixedMass, FixedInertia, ForceMLP
 from util.utils import hat_map_batch
 
 class PhysORD(torch.nn.Module):
-    def __init__(self, device=None, use_dVNet = True, udim = 3, time_step = 0.1):
+    def __init__(self, device=None, use_dVNet = True, udim = 3, time_step = 0.1, use_v_gap = True):
         super(PhysORD, self).__init__()
         self.device = device
         self.xdim = 3
@@ -15,6 +15,7 @@ class PhysORD(torch.nn.Module):
         self.posedim = self.xdim + self.Rdim 
         self.twistdim = self.linveldim + self.angveldim
         self.udim = udim
+        self.use_v_gap = use_v_gap
         # mass matrix
         eps_m = torch.Tensor([900., 900., 900.])
         self.M = FixedMass(m_dim=3, eps=eps_m, param_value=0).to(device)
@@ -29,7 +30,8 @@ class PhysORD(torch.nn.Module):
             self.V_net = MLP(self.posedim, 10, 1).to(device)
         
         # external force
-        self.force_mlp = ForceMLP(13, 64, 6).to(device)
+        force_input_dim = 13 if use_v_gap else 9
+        self.force_mlp = ForceMLP(force_input_dim, 64, 6).to(device)
 
         self.G = 9.8
         self.circumference = 2
@@ -56,7 +58,10 @@ class PhysORD(torch.nn.Module):
             v_gap = v_sum - v_rpm
             c = 0.5
 
-            f_input = torch.cat((qk_dot, uk, v_gap), dim=1)
+            if self.use_v_gap:
+                f_input = torch.cat((qk_dot, uk, v_gap), dim=1)
+            else:
+                f_input = torch.cat((qk_dot, uk), dim=1)
             external_forces = self.force_mlp(f_input)
 
             fR, fX = torch.split(external_forces, [self.angveldim, self.linveldim], dim=1)
