@@ -1,60 +1,92 @@
-import torch
-import argparse
-from physord.model import PhysORD
-from util.data_process import get_test_data
+import sympy
+import numpy as np
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--exp_name', default='physord', type=str, help='experiment name')
-    parser.add_argument('--eval_data_fp', type=str, required=False, default='/data/data0/datasets/tartandrive/data/test-hard/', help='Path to test data')
-    parser.add_argument('--timesteps', type=int, required=False, default=20, help='Number of timesteps to predict')
-    parser.add_argument('--test_sample_interval', type=int, default=1, help='test data sample interval')
+def S(v):
+    """
+    Convert a 3D column vector to a skew-symmetric matrix.
+    Args:
+        v: A tensor of shape (3,) or (1, 3)
+    Returns:
+        A sympy Matrix of shape (3, 3) representing the skew-symmetric matrix.
+    """
+    skew = sympy.Matrix([[0, -v[2, 0], v[1, 0]],
+                         [v[2, 0], 0, -v[0, 0]],
+                         [-v[1, 0], v[0, 0], 0]])
+    return skew
 
-    args = parser.parse_args()
-    device = torch.device('cuda:' + str(0) if torch.cuda.is_available() else 'cpu')
+def trace(A):
+    """
+    Compute the trace of a square matrix.
+    Args:
+        A: A sympy Matrix of shape (n, n)
+    Returns:
+        A sympy expression representing the trace of the matrix.
+    """
+    if not isinstance(A, sympy.Matrix):
+        raise ValueError("Input must be a sympy Matrix")
+    if A.shape[0] != A.shape[1]:
+        raise ValueError("Input matrix must be square")
 
-    # Load the model
-    print("Loading the model ...")
-    model = PhysORD(device=device, use_dVNet = True, time_step = 0.1).to(device)
-    model_dir = f'./pretrained/{args.exp_name}'
-    model_fp = f'{model_dir}/best/best-data507-timestep20.tar'
-    model.load_state_dict(torch.load(model_fp, map_location=device))
+    tr = sum(A[i, i] for i in range(A.shape[0]))
+    return tr
 
-    # Print model.M shape
-    print("Model mass matrix shape:", model.M.shape)
-    print("Model inertia matrix shape:", model.J.shape)
+# Define symbolic variables for inertia matrix components
+J11, J12, J13 = sympy.symbols('J11 J12 J13')
+J21, J22, J23 = sympy.symbols('J21 J22 J23')
+J31, J32, J33 = sympy.symbols('J31 J32 J33')
+J = sympy.Matrix([[J11, J12, J13],
+                  [J21, J22, J23],
+                  [J31, J32, J33]])
+for i in range(3):
+    for j in range(i+1, 3):
+        J[j, i] = J[i, j]
 
-    # Load the data
-    print("Loading the data ...")
-    norm_params = torch.load(f'{model_dir}/norm_params.pth')
-    # test_data = get_test_data(args.eval_data_fp, norm_params, args.timesteps, args.test_sample_interval)
-    test_data = torch.load(args.eval_data_fp, map_location='cpu', weights_only=False)
-    test_data = test_data['val_data']
-    test_data = test_data.clone().detach().to(dtype=torch.float64, device=device).requires_grad_(False)
-    x0 = test_data[0, :, :]
-    u = test_data[:,:, -3:]
-    gt_state = test_data[-1, :, :12]
+print("Symbolic Inertia Matrix J:")
+sympy.pprint(J)
+print("\n")
 
-    # Evaluate the model
-    print("Evaluating ...")
-    model.eval()
-    pred_traj = model.efficient_evaluation(args.timesteps, x0, u)
-    pred_state = pred_traj[-1,:,:12]
+Jd = 0.5*trace(J)*sympy.eye(3) - J
+print("Symbolic Jd (0.5*trace(J)*I - J):")
+sympy.pprint(Jd)
+print("\n")
 
-    rmse_error = (pred_state - gt_state).pow(2).sum(dim=1)
-    rmse_error = rmse_error.mean().sqrt()
-    print("RMSE_error", rmse_error)
+h = sympy.symbols('h') # for time step
+wz = sympy.symbols('wz') # angular velocity about z-axis
+w = sympy.Matrix([0, 0, wz]) # angular velocity vector
+tau_z = sympy.symbols('tau_z') # torque about z-axis
+tau = sympy.Matrix([0, 0, tau_z]) # torque vector
+theta = sympy.symbols('theta') # rotation angle about z-axis
+Z = sympy.Matrix([[sympy.cos(theta), -sympy.sin(theta), 0],
+                  [sympy.sin(theta), sympy.cos(theta), 0],
+                  [0, 0, 1]])
 
-    position_distance = (pred_state[:, :3] - gt_state[:, :3]).pow(2).sum(dim=1).sqrt()
-    position_distance = position_distance.mean()
-    print("position_distance", position_distance)
 
-    pred_rot = pred_state[:, 3:12].view(-1, 3, 3)
-    gt_rot = gt_state[:, 3:12].view(-1, 3, 3)
-    relative_rotation_matrix = torch.bmm(gt_rot, torch.linalg.inv(pred_rot))
-    traces = torch.einsum('bii->b', relative_rotation_matrix)
-    cos_theta = (traces - 1) / 2
-    cos_theta = torch.clamp(cos_theta, -1, 1)
-    angular_distance = torch.acos(cos_theta)
-    angular_distance = angular_distance.mean()
-    print("angular_distance", angular_distance)
+# LHS
+lhs_eqn = h*S(J @ w) + h**2 * S(tau)
+print("LHS of the equation (h*S(J*w) + h^2*S(tau)):")
+sympy.pprint(lhs_eqn)
+print("\n")
+
+# RHS
+rhs_eqn = Z @ Jd - Jd @ Z.T
+print("RHS of the equation (Z*J - J*Z^T):")
+sympy.pprint(rhs_eqn)
+print("\n")
+
+# Full equation
+full_eqn = sympy.Eq(lhs_eqn, rhs_eqn)
+print("Full equation (LHS = RHS):")
+sympy.pprint(full_eqn)
+print("\n")
+
+# Simplify to find theta
+simplified_eqn = sympy.simplify(lhs_eqn - rhs_eqn)
+print("Simplified equation:")
+sympy.pprint(simplified_eqn)
+print("\n")
+
+# Solve for theta
+theta_solution = sympy.solve(simplified_eqn, theta)
+print("Solution for theta:")
+sympy.pprint(theta_solution)
+print("\n")
