@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-from typing import Dict, List, Tuple, Any
+from typing import Dict, Tuple
 
 def detect_motion_cases(velocities: np.ndarray, threshold: float = 0.1) -> str:
     """
@@ -21,9 +21,10 @@ def detect_motion_cases(velocities: np.ndarray, threshold: float = 0.1) -> str:
     vel_changes = np.diff(velocities)
     mean_change = np.mean(vel_changes)
 
-    if mean_change/0.1 > threshold: # 0.1 is time step
+    dt = 0.1  # time step
+    if mean_change/dt > threshold:
         return 'accelerating'
-    elif mean_change/0.1 < -threshold:
+    elif mean_change/dt < -threshold:
         return 'decelerating'
     else:
         return 'uniform'
@@ -82,7 +83,8 @@ def calculate_trajectory_stats(trajectory: np.ndarray) -> Dict[str, float]:
     speeds = np.linalg.norm(velocities, axis=1)
 
     # Calculate accelerations from velocity changes
-    accelerations = np.diff(velocities, axis=0) / 0.1
+    dt = 0.1  # time step
+    accelerations = np.diff(velocities, axis=0) / dt
     accel_magnitudes = np.linalg.norm(accelerations, axis=1)
 
     # Determine motion case and calculate signed acceleration for decelerating cases
@@ -128,7 +130,7 @@ def classify_trajectory(trajectory: np.ndarray) -> Tuple[str, str]:
     return motion_case, path_case
 
 def find_representative_trajectories(gt_data: torch.Tensor, pred_data: torch.Tensor,
-                                   num_samples: int = 1000) -> Dict[str, Dict[str, List[int]]]:
+                                   num_samples: int = 1000) -> Dict[str, Dict[str, list]]:
     """
     Find representative trajectories for each motion and path case combination.
 
@@ -270,8 +272,6 @@ def create_comprehensive_plot(gt_data: torch.Tensor, pred_data: torch.Tensor,
     gt_np = gt_data.cpu().numpy() if isinstance(gt_data, torch.Tensor) else gt_data
     pred_np = pred_data.cpu().numpy() if isinstance(pred_data, torch.Tensor) else pred_data
 
-    print(case_trajectories)
-
     for i, motion_case in enumerate(motion_cases):
         for j, path_case in enumerate(path_cases):
             ax = axes[i, j]
@@ -308,49 +308,6 @@ def create_comprehensive_plot(gt_data: torch.Tensor, pred_data: torch.Tensor,
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
 
-def plot_single_case(gt_data: torch.Tensor, pred_data: torch.Tensor,
-                    motion_case: str, path_case: str,
-                    save_path: str = None) -> None:
-    """
-    Plot a single motion/path case comparison.
-
-    Args:
-        gt_data: Ground truth trajectories [timesteps, batch, features]
-        pred_data: Predicted trajectories [timesteps, batch, features]
-        motion_case: Motion case to plot ('accelerating', 'uniform', 'decelerating')
-        path_case: Path case to plot ('straight', 'slight_turn', 'continuous_turn')
-        save_path: Optional path to save the plot
-    """
-    case_trajectories = find_representative_trajectories(gt_data, pred_data)
-
-    gt_np = gt_data.cpu().numpy() if isinstance(gt_data, torch.Tensor) else gt_data
-    pred_np = pred_data.cpu().numpy() if isinstance(pred_data, torch.Tensor) else pred_data
-
-    traj_indices = case_trajectories[motion_case][path_case]
-
-    if not traj_indices:
-        print(f"No trajectories found for {motion_case} + {path_case} case")
-        return
-
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-
-    # Plot multiple examples if available
-    for i, idx in enumerate(traj_indices[:3]):  # Max 3 examples
-        gt_traj = gt_np[:, idx, :]
-        pred_traj = pred_np[:, idx, :]
-        stats = calculate_trajectory_stats(gt_traj)
-
-        plot_trajectory_comparison(gt_traj, pred_traj, motion_case, path_case, ax, stats)
-
-    title = f"{motion_case.title()} + {path_case.replace('_', ' ').title()}"
-    ax.set_title(title, fontsize=14)
-    ax.legend()
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-
-    plt.show()
-
 
 if __name__ == "__main__":
     import argparse
@@ -373,9 +330,6 @@ if __name__ == "__main__":
     parser.add_argument('--use_v_gap', action='store_true', help='Whether model uses v_gap (RPM difference)')
     parser.add_argument('--figsize', type=int, nargs=2, default=[16, 12], help='Figure size (width height)')
     parser.add_argument('--no_show', action='store_true', help='Do not display plots, only save them')
-    parser.add_argument('--plot_type', type=str, choices=['comprehensive', 'individual', 'both'], default='comprehensive',
-                       help='Type of plots to generate')
-
     args = parser.parse_args()
 
     # Set device
@@ -433,23 +387,9 @@ if __name__ == "__main__":
     print(f"Ground truth shape: {gt_data.shape}")
     print(f"Predictions shape: {pred_data.shape}")
 
-    # Generate plots based on type
-    if args.plot_type in ['comprehensive', 'both']:
-        print("Creating comprehensive analysis plot...")
-        save_path = os.path.join(args.save_dir, 'comprehensive_analysis.png')
-        create_comprehensive_plot(gt_data, pred_data, save_path=save_path, figsize=tuple(args.figsize))
-        print(f"Comprehensive plot saved to: {save_path}")
-
-    if args.plot_type in ['individual', 'both']:
-        print("Creating individual plots for all cases...")
-        motion_cases = ['accelerating', 'uniform', 'decelerating']
-        path_cases = ['straight', 'slight_turn', 'continuous_turn']
-
-        for motion in motion_cases:
-            for path in path_cases:
-                filename = f'{motion}_{path}.png'
-                save_path = os.path.join(args.save_dir, filename)
-                plot_single_case(gt_data, pred_data, motion, path, save_path=save_path)
-                print(f"Individual plot saved to: {save_path}")
-
+    # Generate comprehensive plot
+    print("Creating comprehensive analysis plot...")
+    save_path = os.path.join(args.save_dir, 'comprehensive_analysis.png')
+    create_comprehensive_plot(gt_data, pred_data, save_path=save_path, figsize=tuple(args.figsize))
+    print(f"Comprehensive plot saved to: {save_path}")
     print(f"All plots saved to: {args.save_dir}")
