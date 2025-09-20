@@ -2,7 +2,7 @@
 # Simplified version of 3D PhysORD for planar motion (x-y plane, z-axis rotation only)
 
 import torch
-from planar_nn_models import FixedMass, FixedInertia, ForceMLP
+from planar_physord.planar_nn_models import FixedMass, FixedInertia, ForceMLP
 
 class PlanarPhysORD(torch.nn.Module):
     """
@@ -19,7 +19,7 @@ class PlanarPhysORD(torch.nn.Module):
     - Control inputs: [ux, uy, uθ] (2D force + torque commands)
     """
     
-    def __init__(self, device=None, udim=3, time_step=0.1):
+    def __init__(self, device=None, udim=3, time_step=0.1, use_v_gap=True):
         super(PlanarPhysORD, self).__init__()
         self.device = device
         
@@ -31,6 +31,7 @@ class PlanarPhysORD(torch.nn.Module):
         self.angveldim = 1      # 1D angular velocity (ωz)
         self.twistdim = self.linveldim + self.angveldim  # Total twist dimension = 3
         self.udim = udim        # Control input dimension
+        self.use_v_gap = use_v_gap  # Whether to include velocity gap in force network
         
         # Mass matrix for planar motion (2x2 diagonal matrix)
         # Represents mass in x and y directions
@@ -44,9 +45,11 @@ class PlanarPhysORD(torch.nn.Module):
         # No potential energy network needed for planar case (constant height)
         
         # External force and torque network
-        # Input: [vx, vy, ωz, ux, uy, uθ, v_gap(4)] = 10 dimensions
+        # Input depends on use_v_gap: with v_gap [vx, vy, ωz, ux, uy, uθ, v_gap(4)] = 10 dimensions
+        #                           without v_gap [vx, vy, ωz, ux, uy, uθ] = 6 dimensions
         # Output: [fx, fy, τz] = 3 dimensions (2D force + z-axis torque)
-        self.force_mlp = ForceMLP(10, 64, 3).to(device)
+        force_input_dim = 10 if use_v_gap else 6
+        self.force_mlp = ForceMLP(force_input_dim, 64, 3).to(device)
         
         # Physical constants
         self.circumference = 2    # Wheel circumference for RPM conversion
@@ -88,7 +91,10 @@ class PlanarPhysORD(torch.nn.Module):
             v_gap = v_sum - v_rpm  # 4D velocity gap (one for each wheel)
             
             # Prepare input for force/torque neural network
-            f_input = torch.cat((vk, omegak, uk, v_gap), dim=1)  # [vx, vy, ωz, ux, uy, uθ, v_gap(4)]
+            if self.use_v_gap:
+                f_input = torch.cat((vk, omegak, uk, v_gap), dim=1)  # [vx, vy, ωz, ux, uy, uθ, v_gap(4)]
+            else:
+                f_input = torch.cat((vk, omegak, uk), dim=1)  # [vx, vy, ωz, ux, uy, uθ]
             external_forces = self.force_mlp(f_input)  # Neural network output [fx, fy, τz]
             
             # Split forces and torques

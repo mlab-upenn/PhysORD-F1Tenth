@@ -3,6 +3,7 @@ import numpy as np
 import os
 import time
 from physord.model import PhysORD
+from planar_physord.planar_model import PlanarPhysORD
 from util.data_process import get_model_parm_nums, get_train_val_data
 from util.utils import state_loss
 
@@ -43,7 +44,10 @@ def train(args, train_data, val_data):
 
     # model
     print("Creating model ...")
-    model = PhysORD(device=device, use_dVNet = True, time_step = 0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
+    if args.model_type == '2d':
+        model = PlanarPhysORD(device=device, time_step=0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
+    else:
+        model = PhysORD(device=device, use_dVNet=True, time_step=0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
     if args.pretrained is not None:
         print("loading pretrained model")
         model.load_state_dict(torch.load(args.pretrained, map_location=device))
@@ -63,7 +67,7 @@ def train(args, train_data, val_data):
         patience = 150
     else:
         patience = args.num_epochs
-    batch_size = 31000
+    batch_size = args.batch_size
     steps_total = len(train_data[1]) // batch_size + (1 if len(train_data[1]) % batch_size != 0 else 0)
     for epoch in range(args.num_epochs):
         model.train()
@@ -81,8 +85,12 @@ def train(args, train_data, val_data):
             target = x[1:, :, :]
             target_hat = x_hat[1:, :, :]
 
-            train_loss_mini = \
-                state_loss(target, target_hat, split=[model.xdim, model.Rdim, model.twistdim, model.udim, 4, 4])
+            if args.model_type == '2d':
+                train_loss_mini = \
+                    state_loss(target, target_hat, split=[model.xdim, model.thetadim, model.twistdim, model.udim, 4, 4])
+            else:
+                train_loss_mini = \
+                    state_loss(target, target_hat, split=[model.xdim, model.Rdim, model.twistdim, model.udim, 4, 4])
             loss = loss + train_loss_mini.item()
 
             train_loss_mini.backward()
@@ -94,8 +102,12 @@ def train(args, train_data, val_data):
         model.eval()
         with torch.no_grad():
             val_hat = model.evaluation(args.timesteps, val_data)
-            val_state = val_hat[-1,:,:12]
-            gt_state = val_data[-1,:,:12]
+            if args.model_type == '2d':
+                val_state = val_hat[-1,:,:3]  # 2D: x,y,θ
+                gt_state = val_data[-1,:,:3]
+            else:
+                val_state = val_hat[-1,:,:12]  # 3D: x,y,z,R(9)
+                gt_state = val_data[-1,:,:12]
             # rmse error
             rmse_error = (val_state - gt_state).pow(2).sum(dim=1)
             val_error = rmse_error.mean().sqrt()
@@ -152,6 +164,8 @@ if __name__ == "__main__":
     parser.add_argument('--save_every', default=1000, type=int, help='number of save steps')
     parser.add_argument('--seed', default=0, type=int, help='random seed')
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--model_type', default='3d', choices=['2d', '3d'], type=str, help='model type: 2d (planar) or 3d (full 6DOF)')
+    parser.add_argument('--batch_size', default=31000, type=int, help='training batch size')
     parser.add_argument('--use_v_gap', dest='use_v_gap', action='store_true', help='whether to include v_gap (RPM difference) as input to the model')
     parser.add_argument('--no_v_gap', dest='use_v_gap', action='store_false', help='exclude v_gap (RPM difference) from model input')
     parser.set_defaults(feature=True, use_v_gap=True)
