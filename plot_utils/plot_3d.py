@@ -21,58 +21,40 @@ def detect_motion_cases(velocities: np.ndarray, threshold: float = 0.1) -> str:
     vel_changes = np.diff(velocities)
     mean_change = np.mean(vel_changes)
 
-    if mean_change > threshold:
+    if mean_change/0.1 > threshold: # 0.1 is time step
         return 'accelerating'
-    elif mean_change < -threshold:
+    elif mean_change/0.1 < -threshold:
         return 'decelerating'
     else:
         return 'uniform'
 
-def detect_path_cases(positions: np.ndarray, threshold_straight: float = 0.05,
-                     threshold_oscillation: float = 0.3) -> str:
+def detect_path_cases(trajectory: np.ndarray, threshold_straight: float = 0.05) -> str:
     """
-    Detect path case based on trajectory curvature and patterns.
+    Detect path case based on angular velocities.
 
     Args:
-        positions: Array of positions over time [timesteps, 2 or 3]
+        trajectory: Array of trajectory states over time [timesteps, features]
         threshold_straight: Threshold for detecting straight paths
-        threshold_oscillation: Threshold for detecting oscillations
 
     Returns:
-        Path case: 'straight', 'slight_turn', 'continuous_turn', or 'oscillating'
+        Path case: 'straight', 'slight_turn', or 'continuous_turn'
     """
-    if len(positions) < 3:
+    if len(trajectory) < 3:
         return 'straight'
 
-    # Calculate path curvature using consecutive points
-    directions = np.diff(positions, axis=0)
-    if len(directions) < 2:
+    # Determine if 2D or 3D based on trajectory features
+    if trajectory.shape[1] >= 18:  # 3D case
+        angular_velocities = trajectory[:, 15:18]  # omega_x, omega_y, omega_z
+        angular_speeds = np.linalg.norm(angular_velocities, axis=1)
+    else:  # 2D case
+        angular_speeds = np.abs(trajectory[:, 6])  # omega_z only
+
+    mean_angular_speed = np.mean(angular_speeds)
+
+    # Check angular speed magnitude
+    if mean_angular_speed < threshold_straight:
         return 'straight'
-
-    # Normalize directions
-    direction_norms = np.linalg.norm(directions, axis=1)
-    direction_norms[direction_norms == 0] = 1  # Avoid division by zero
-    normalized_directions = directions / direction_norms[:, np.newaxis]
-
-    # Calculate angles between consecutive direction vectors
-    angles = []
-    for i in range(len(normalized_directions) - 1):
-        dot_product = np.clip(np.dot(normalized_directions[i], normalized_directions[i+1]), -1, 1)
-        angle = np.arccos(dot_product)
-        angles.append(angle)
-
-    angles = np.array(angles)
-    mean_curvature = np.mean(angles)
-    curvature_std = np.std(angles)
-
-    # Check for oscillations (high variance in angles)
-    if curvature_std > threshold_oscillation:
-        return 'oscillating'
-
-    # Check curvature magnitude
-    if mean_curvature < threshold_straight:
-        return 'straight'
-    elif mean_curvature < 0.2:  # Moderate turning
+    elif mean_angular_speed < 0.5:  # Moderate turning
         return 'slight_turn'
     else:
         return 'continuous_turn'
@@ -91,19 +73,29 @@ def calculate_trajectory_stats(trajectory: np.ndarray) -> Dict[str, float]:
         # Handle batch dimension [timesteps, batch, features]
         trajectory = trajectory.mean(axis=1)  # Average over batch
 
-    positions = trajectory[:, :3]  # x, y, z positions
+    # Use proper velocity indices based on trajectory type
+    if trajectory.shape[1] >= 15:  # 3D case
+        velocities = trajectory[:, 12:15]  # vx, vy, vz
+    else:  # 2D case
+        velocities = trajectory[:, 4:6]  # vx, vy
 
-    # Calculate velocities
-    velocities = np.diff(positions, axis=0)
     speeds = np.linalg.norm(velocities, axis=1)
 
-    # Calculate accelerations
-    accelerations = np.diff(velocities, axis=0)
+    # Calculate accelerations from velocity changes
+    accelerations = np.diff(velocities, axis=0) / 0.1
     accel_magnitudes = np.linalg.norm(accelerations, axis=1)
+
+    # Determine motion case and calculate signed acceleration for decelerating cases
+    motion_case = detect_motion_cases(speeds)
+    mean_acceleration = np.mean(accel_magnitudes)
+
+    if motion_case == 'decelerating':
+        # For decelerating trajectories, show negative acceleration
+        mean_acceleration = -mean_acceleration
 
     return {
         'mean_speed': np.mean(speeds),
-        'mean_acceleration': np.mean(accel_magnitudes)
+        'mean_acceleration': mean_acceleration
     }
 
 def classify_trajectory(trajectory: np.ndarray) -> Tuple[str, str]:
@@ -122,19 +114,21 @@ def classify_trajectory(trajectory: np.ndarray) -> Tuple[str, str]:
     else:
         traj = trajectory
 
-    positions = traj[:, :3]  # x, y, z positions
+    # Use proper velocity indices based on trajectory type
+    if traj.shape[1] >= 15:  # 3D case
+        velocities = traj[:, 12:15]  # vx, vy, vz
+    else:  # 2D case
+        velocities = traj[:, 4:6]  # vx, vy
 
-    # Calculate velocities for motion classification
-    velocities = np.diff(positions, axis=0)
     speeds = np.linalg.norm(velocities, axis=1)
 
     motion_case = detect_motion_cases(speeds)
-    path_case = detect_path_cases(positions)
+    path_case = detect_path_cases(traj)
 
     return motion_case, path_case
 
 def find_representative_trajectories(gt_data: torch.Tensor, pred_data: torch.Tensor,
-                                   num_samples: int = 100) -> Dict[str, Dict[str, List[int]]]:
+                                   num_samples: int = 1000) -> Dict[str, Dict[str, List[int]]]:
     """
     Find representative trajectories for each motion and path case combination.
 
@@ -147,20 +141,33 @@ def find_representative_trajectories(gt_data: torch.Tensor, pred_data: torch.Ten
         Dictionary mapping case combinations to trajectory indices
     """
     gt_np = gt_data.cpu().numpy() if isinstance(gt_data, torch.Tensor) else gt_data
-    pred_np = pred_data.cpu().numpy() if isinstance(pred_data, torch.Tensor) else pred_data
 
     # Sample trajectories for efficiency
     batch_size = gt_np.shape[1]
     sample_indices = np.random.choice(batch_size, min(num_samples, batch_size), replace=False)
 
     case_trajectories = {
-        'accelerating': {'straight': [], 'slight_turn': [], 'continuous_turn': [], 'oscillating': []},
-        'uniform': {'straight': [], 'slight_turn': [], 'continuous_turn': [], 'oscillating': []},
-        'decelerating': {'straight': [], 'slight_turn': [], 'continuous_turn': [], 'oscillating': []}
+        'accelerating': {'straight': [], 'slight_turn': [], 'continuous_turn': []},
+        'uniform': {'straight': [], 'slight_turn': [], 'continuous_turn': []},
+        'decelerating': {'straight': [], 'slight_turn': [], 'continuous_turn': []}
     }
 
     for idx in sample_indices:
         traj = gt_np[:, idx, :]
+
+        # Calculate mean speed and filter out slow trajectories
+        if traj.shape[1] >= 15:  # 3D case
+            velocities = traj[:, 12:15]  # vx, vy, vz
+        else:  # 2D case
+            velocities = traj[:, 4:6]  # vx, vy
+
+        speeds = np.linalg.norm(velocities, axis=1)
+        mean_speed = np.mean(speeds)
+
+        # Skip trajectories with mean speed less than 0.9 m/s
+        if mean_speed < 0.9:
+            continue
+
         motion_case, path_case = classify_trajectory(traj)
 
         if len(case_trajectories[motion_case][path_case]) < 3:  # Limit to 3 examples per case
@@ -196,8 +203,29 @@ def plot_trajectory_comparison(gt_traj: np.ndarray, pred_traj: np.ndarray,
     ax.plot(gt_pos[0, 0], gt_pos[0, 1], 'go', markersize=8, label='Start')
     ax.plot(gt_pos[-1, 0], gt_pos[-1, 1], 'rs', markersize=8, label='End')
 
+    # Calculate trajectory bounds to scale appropriately
+    all_pos = np.vstack([gt_pos, pred_pos])
+    x_min, x_max = all_pos[:, 0].min(), all_pos[:, 0].max()
+    y_min, y_max = all_pos[:, 1].min(), all_pos[:, 1].max()
+
+    # Add padding and ensure same width/height by using the larger range
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    max_range = max(x_range, y_range)
+
+    # Add 10% padding
+    padding = max_range * 0.1
+    max_range_padded = max_range + 2 * padding
+
+    # Center the plot and use same width/height
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+
+    ax.set_xlim(x_center - max_range_padded/2, x_center + max_range_padded/2)
+    ax.set_ylim(y_center - max_range_padded/2, y_center + max_range_padded/2)
+
     # Add statistics text
-    stats_text = f"Speed={stats['mean_speed']:.2f}m/s\nAccel={stats['mean_acceleration']:.2f}m/s�"
+    stats_text = f"Speed={stats['mean_speed']:.2f}m/s\nAccel={stats['mean_acceleration']:.2f}m/s²"
     ax.text(0.05, 0.95, stats_text, transform=ax.transAxes,
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -224,9 +252,9 @@ def create_comprehensive_plot(gt_data: torch.Tensor, pred_data: torch.Tensor,
 
     # Create subplot grid
     motion_cases = ['accelerating', 'uniform', 'decelerating']
-    path_cases = ['straight', 'slight_turn', 'continuous_turn', 'oscillating']
+    path_cases = ['straight', 'slight_turn', 'continuous_turn']
 
-    fig, axes = plt.subplots(3, 4, figsize=figsize)
+    fig, axes = plt.subplots(3, 3, figsize=figsize)
     fig.suptitle('Ground Truth vs PhysORD Predictions: Motion and Path Analysis', fontsize=16)
 
     # Column titles
@@ -290,7 +318,7 @@ def plot_single_case(gt_data: torch.Tensor, pred_data: torch.Tensor,
         gt_data: Ground truth trajectories [timesteps, batch, features]
         pred_data: Predicted trajectories [timesteps, batch, features]
         motion_case: Motion case to plot ('accelerating', 'uniform', 'decelerating')
-        path_case: Path case to plot ('straight', 'slight_turn', 'continuous_turn', 'oscillating')
+        path_case: Path case to plot ('straight', 'slight_turn', 'continuous_turn')
         save_path: Optional path to save the plot
     """
     case_trajectories = find_representative_trajectories(gt_data, pred_data)
@@ -415,7 +443,7 @@ if __name__ == "__main__":
     if args.plot_type in ['individual', 'both']:
         print("Creating individual plots for all cases...")
         motion_cases = ['accelerating', 'uniform', 'decelerating']
-        path_cases = ['straight', 'slight_turn', 'continuous_turn', 'oscillating']
+        path_cases = ['straight', 'slight_turn', 'continuous_turn']
 
         for motion in motion_cases:
             for path in path_cases:
