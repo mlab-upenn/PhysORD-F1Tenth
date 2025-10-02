@@ -15,6 +15,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default=1000, type=int, help='batch size for inference')
     parser.add_argument('--use_v_gap', dest='use_v_gap', action='store_true', help='whether to include v_gap (RPM difference) as input to the model')
     parser.add_argument('--no_v_gap', dest='use_v_gap', action='store_false', help='exclude v_gap (RPM difference) from model input')
+    parser.add_argument('--control_dim', default=3, type=int, choices=[2, 3], help='number of control input dimensions to use (2 or 3)')
+    parser.add_argument('--time_step', default=0.1, type=float, help='time step for model integration')
     parser.set_defaults(use_v_gap=True)
 
     args = parser.parse_args()
@@ -23,9 +25,9 @@ if __name__ == '__main__':
     # Load the model
     print("Loading the model ...")
     if args.model_type == '2d':
-        model = PlanarPhysORD(device=device, time_step=0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
+        model = PlanarPhysORD(device=device, time_step=args.time_step, udim=args.control_dim, use_v_gap=args.use_v_gap).to(device)
     else:
-        model = PhysORD(device=device, use_dVNet=True, time_step=0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
+        model = PhysORD(device=device, use_dVNet=True, time_step=args.time_step, udim=args.control_dim, use_v_gap=args.use_v_gap).to(device)
     model_dir = f'./{args.model_root_dir}/{args.exp_name}'
     model_fp = f'{model_dir}/best/best-data507-timestep20.tar'
     model.load_state_dict(torch.load(model_fp, map_location=device))
@@ -37,7 +39,9 @@ if __name__ == '__main__':
     test_data = torch.load(args.eval_data_fp)['val_data']
     test_data = test_data.clone().detach().to(dtype=torch.float64, device=device).requires_grad_(False)
     x0 = test_data[0, :, :]
-    u = test_data[:,:, -3:]
+    # Extract control inputs: take first control_dim inputs from the last 3 control dimensions
+    u_full = test_data[:,:, -3:]  # Get all 3 control inputs
+    u = u_full[:,:, :args.control_dim]  # Take only the first control_dim inputs
     if args.model_type == '2d':
         gt_state = test_data[args.timesteps, :, :3]  # 2D: x,y,θ
     else:

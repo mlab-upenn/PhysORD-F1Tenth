@@ -30,7 +30,7 @@ class PhysORD(torch.nn.Module):
             self.V_net = MLP(self.posedim, 10, 1).to(device)
         
         # external force
-        force_input_dim = 13 if use_v_gap else 9
+        force_input_dim = (6 + udim + 4) if use_v_gap else (6 + udim)
         self.force_mlp = ForceMLP(force_input_dim, 64, 6).to(device)
 
         self.G = 9.8
@@ -43,7 +43,7 @@ class PhysORD(torch.nn.Module):
         with torch.enable_grad():
             bs = x.shape[0]
             I33 = torch.eye(3).repeat(bs, 1, 1).to(self.device)
-            qk, qk_dot, sk, rpmk, uk = torch.split(x, [self.posedim, self.twistdim, 4, 4, self.udim], dim=1)
+            qk, qk_dot, sk, rpmk, uk = torch.split(x, [self.posedim, self.twistdim, 4, 4, 3], dim=1)
             qxk, qRk = torch.split(qk, [self.xdim, self.Rdim], dim=1)
             vk, omegak = torch.split(qk_dot, [self.linveldim, self.angveldim], dim=1)
             Rk = qRk.view(-1, 3, 3)
@@ -58,10 +58,12 @@ class PhysORD(torch.nn.Module):
             v_gap = v_sum - v_rpm
             c = 0.5
 
+            # Use only the first udim control inputs
+            uk_used = uk[:, :self.udim]
             if self.use_v_gap:
-                f_input = torch.cat((qk_dot, uk, v_gap), dim=1)
+                f_input = torch.cat((qk_dot, uk_used, v_gap), dim=1)
             else:
-                f_input = torch.cat((qk_dot, uk), dim=1)
+                f_input = torch.cat((qk_dot, uk_used), dim=1)
             external_forces = self.force_mlp(f_input)
 
             fR, fX = torch.split(external_forces, [self.angveldim, self.linveldim], dim=1)
