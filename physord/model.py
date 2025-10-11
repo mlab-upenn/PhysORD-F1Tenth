@@ -17,9 +17,11 @@ class PhysORD(torch.nn.Module):
         self.udim = udim
         self.use_v_gap = use_v_gap
         # mass matrix
-        eps_m = torch.Tensor([900., 900., 900.])
+        eps_m = torch.Tensor([15.32, 15.32, 15.32])
+        # eps_m = torch.Tensor([100, 100, 100])
         self.M = FixedMass(m_dim=3, eps=eps_m, param_value=0).to(device)
-        eps_j = torch.Tensor([400., 400., 1000.])
+        eps_j = torch.Tensor([0.643, 0.643, 0.643])
+        # eps_j = torch.Tensor([10, 10, 10])
         self.J = FixedInertia(m_dim=3, eps=eps_j, param_value=0).to(device)
 
         # potential energy
