@@ -2,6 +2,7 @@
 # and https://github.com/papagina/RotationContinuity/blob/master/sanity_test/code/tools.py
 
 import torch
+import numpy as np
 
 def hat_map_batch(a):
     zero_vec = torch.zeros_like(a[:,0])
@@ -72,6 +73,30 @@ def compute_geodesic_loss(gt_r_matrix, out_r_matrix):
 ################################ Loss for SE(3) ################################
 def L2_loss(u, v):
     return (u-v).pow(2).mean()
+
+
+def planar_state_loss(s,s_hat, split):
+    x_hat, theta_hat, q_dot_hat, _, _, _ = torch.split(s_hat, split, dim=2)
+    x, theta, q_dot, _, _, _ = torch.split(s, split, dim=2)
+    v_hat, w_hat = torch.split(q_dot_hat, [2,1], dim=2)
+    v, w = torch.split(q_dot, [2, 1], dim=2)
+
+    v = v.flatten(start_dim=0, end_dim=1)
+    v_hat = v_hat.flatten(start_dim=0, end_dim=1)
+    vloss = L2_loss(v, v_hat)
+    w = w.flatten(start_dim=0, end_dim=1)
+    w_hat = w_hat.flatten(start_dim=0, end_dim=1)
+    wloss = L2_loss(w, w_hat)
+    x = x.flatten(start_dim=0, end_dim=1)
+    x_hat = x_hat.flatten(start_dim=0, end_dim=1)
+    x_loss = L2_loss(x, x_hat)
+    theta = theta.flatten(start_dim=0, end_dim=1)
+    theta_hat = theta_hat.flatten(start_dim=0, end_dim=1)
+    # Bring angle difference to [-π, π]
+    angle_diff = theta - theta_hat
+    angle_diff = (angle_diff + np.pi) % (2 * np.pi) - np.pi
+    theta_loss = L2_loss(angle_diff, torch.zeros_like(angle_diff))
+    return x_loss + vloss + wloss + theta_loss
 
 def state_loss(s,s_hat, split):
     x_hat, R_hat, q_dot_hat, _, _, _ = torch.split(s_hat, split, dim=2)
