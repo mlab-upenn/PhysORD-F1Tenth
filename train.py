@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from physord.model import PhysORD
 from planar_physord.planar_model import PlanarPhysORD
 from util.data_process import get_model_parm_nums, get_train_val_data
-from util.utils import state_loss
+from util.utils import state_loss, planar_state_loss
 
 def data_load(args):
     # normalize the data
@@ -51,7 +51,7 @@ def data_load(args):
         data_fp = args.preprocessed_data_dir + f'train_val_{val_set}_{args.train_data_size}_step{args.timesteps}.pt'
         print(f"loading preprocessed data: {data_fp}")
         data_loaded = torch.load(data_fp)
-        train_data = data_loaded['train_data'] # [:, :50000, :]
+        train_data = data_loaded['train_data'] # [:, :5000, :]
         val_data = data_loaded['val_data']
         norm_params = data_loaded['norm_params']
     else:
@@ -69,8 +69,9 @@ def data_load(args):
     torch.save(norm_params, f'{save_fp}/norm_params.pth')
     train_data = train_data.clone().detach().to(dtype=torch.float64, device=device).requires_grad_(True)
     val_data = val_data.clone().detach().to(dtype=torch.float64, device=device).requires_grad_(False)
-    print(f"train data: {train_data.shape}, val data: {val_data.shape}")
     
+    # train_data, val_data = train_data[:, 3, :], val_data[:, :50, :]
+    print(f"train data: {train_data.shape}, val data: {val_data.shape}")
     return train_data, val_data
 
 
@@ -134,7 +135,7 @@ def train(args, train_data, val_data):
 
             if args.model_type == '2d':
                 train_loss_mini = \
-                    state_loss(target, target_hat, split=[model.xdim, model.thetadim, model.twistdim, 3, 4, 4])
+                    planar_state_loss(target, target_hat, split=[model.xdim, model.thetadim, model.twistdim, model.udim, 4, 4])
             else:
                 train_loss_mini = \
                     state_loss(target, target_hat, split=[model.xdim, model.Rdim, model.twistdim, 3, 4, 4])

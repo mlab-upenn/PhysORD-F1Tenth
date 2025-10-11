@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import glob
+import argparse
 from scipy.spatial.transform import Rotation
 
 def arrange_data_sample(x, num_points=21, sample_intervals=1):
@@ -131,10 +132,20 @@ def process_all_csvs_to_tensor(csv_dir, output_path, timesteps=21):
     return final_tensor
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Convert CSV files to tensor format')
+    parser.add_argument('--timesteps', type=int, default=21,
+                        help='Number of timesteps per sequence (default: 21)')
+    parser.add_argument('--csv_dir', type=str, default="./data/f1fifth_csvs/",
+                        help='Directory containing CSV files (default: ./data/f1fifth_csvs/)')
+    parser.add_argument('--output', type=str, default="./data/custom_f1fifth_6.pt",
+                        help='Output tensor file path (default: ./data/custom_f1fifth_6.pt)')
+    args = parser.parse_args()
+
     # Configuration
-    csv_directory = "./data/f1fifth_csvs/"
-    output_file = "./data/custom_f1fifth_4.pt"
-    timesteps = 21  # Current + next 20 timesteps
+    csv_directory = args.csv_dir
+    output_file = args.output
+    timesteps = args.timesteps
 
     print("Starting CSV to tensor conversion...")
     print(f"Input directory: {csv_directory}")
