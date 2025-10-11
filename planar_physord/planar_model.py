@@ -3,6 +3,7 @@
 
 import torch
 from planar_physord.planar_nn_models import FixedMass, FixedInertia, ForceMLP
+import numpy as np
 
 class PlanarPhysORD(torch.nn.Module):
     """
@@ -11,15 +12,15 @@ class PlanarPhysORD(torch.nn.Module):
     - Rotation only about z-axis (scalar angle θ)
     - No potential energy changes (constant height)
     
-    State vector structure: [x, y, θ, vx, vy, ωz, s, rpm, ux, uy, uθ]
+    State vector structure: [x, y, θ, vx, vy, ωz, s, rpm, u_speed, u_steer]
     - Position: [x, y, θ] (2D position + rotation angle)
     - Velocity: [vx, vy, ωz] (2D linear velocity + angular velocity)
     - Sensor data: [s] (4D sensor readings)
     - RPM data: [rpm] (4D RPM readings)  
-    - Control inputs: [ux, uy, uθ] (2D force + torque commands)
+    - Control inputs: [u_speed, u_steer] (commanded speed, steering angle)
     """
     
-    def __init__(self, device=None, udim=3, time_step=0.1, use_v_gap=True):
+    def __init__(self, device=None, udim=2, time_step=0.1, use_v_gap=True):
         super(PlanarPhysORD, self).__init__()
         self.device = device
         
@@ -35,20 +36,22 @@ class PlanarPhysORD(torch.nn.Module):
         
         # Mass matrix for planar motion (2x2 diagonal matrix)
         # Represents mass in x and y directions
-        eps_m = torch.Tensor([900., 900.])  # [mass_x, mass_y]
-        self.M = FixedMass(m_dim=2, eps=eps_m, param_value=0).to(device)
+        eps_m = torch.Tensor([3.74, 3.74])  # [mass_x, mass_y]
+        # self.M = FixedMass(m_dim=2, eps=eps_m, param_value=0).to(device)
+        self.M = 3.74
         
         # Inertia matrix for planar motion (scalar moment of inertia about z-axis)
-        eps_j = torch.Tensor([1000.])  # [Iz] - only z-axis inertia needed
-        self.J = FixedInertia(m_dim=1, eps=eps_j, param_value=0).to(device)
+        eps_j = torch.Tensor([0.047])  # [Iz] - only z-axis inertia needed
+        # self.J = FixedInertia(m_dim=1, eps=eps_j, param_value=0).to(device)
+        self.J = 0.047
         
         # No potential energy network needed for planar case (constant height)
         
         # External force and torque network
-        # Input depends on use_v_gap: with v_gap [vx, vy, ωz, ux, uy, uθ, v_gap(4)] = 10 dimensions
-        #                           without v_gap [vx, vy, ωz, ux, uy, uθ] = 6 dimensions
+        # Input depends on use_v_gap: with v_gap [vx, vy, ωz, u_inputs, v_gap(4)] = (3 + udim + 4) dimensions
+        #                           without v_gap [vx, vy, ωz, u_inputs] = (3 + udim) dimensions
         # Output: [fx, fy, τz] = 3 dimensions (2D force + z-axis torque)
-        force_input_dim = 10 if use_v_gap else 6
+        force_input_dim = (3 + udim + 4) if use_v_gap else (3 + udim)
         self.force_mlp = ForceMLP(force_input_dim, 64, 3).to(device)
         
         # Physical constants
@@ -80,21 +83,26 @@ class PlanarPhysORD(torch.nn.Module):
             vk, omegak = torch.split(twist_k, [self.linveldim, self.angveldim], dim=1)  # [vx,vy], [ωz]
             
             # Extract mass and inertia matrices
-            Mx = self.M.repeat(bs, 1, 1)      # (bs, 2, 2) - 2D mass matrix
-            MR = self.J.repeat(bs, 1, 1)      # (bs, 1, 1) - scalar inertia matrix
-            Mx_inv = torch.inverse(Mx)        # Inverse mass matrix
-            MR_inv = torch.inverse(MR)        # Inverse inertia matrix
+            # Mx = self.M.repeat(bs, 1, 1)      # (bs, 2, 2) - 2D mass matrix
+            # MR = self.J.repeat(bs, 1, 1)      # (bs, 1, 1) - scalar inertia matrix
+            # Mx_inv = torch.inverse(Mx)        # Inverse mass matrix
+            # MR_inv = torch.inverse(MR)        # Inverse inertia matrix
+            self.m = self.M
+            self.Iz = self.J
             
             # Compute velocity gap for 4 wheels (4-dimensional as in original)
             v_rpm = rpmk / 60 * self.circumference  # Convert RPM to velocity for each wheel
             v_sum = torch.sqrt(torch.sum(vk ** 2, dim=1, keepdim=True))  # Speed magnitude
             v_gap = v_sum - v_rpm  # 4D velocity gap (one for each wheel)
             
+            # Use only the first udim control inputs
+            uk_used = uk[:, :self.udim]
+
             # Prepare input for force/torque neural network
             if self.use_v_gap:
-                f_input = torch.cat((vk, omegak, uk, v_gap), dim=1)  # [vx, vy, ωz, ux, uy, uθ, v_gap(4)]
+                f_input = torch.cat((vk, omegak, uk_used, v_gap), dim=1)  # [vx, vy, ωz, u_inputs, v_gap(4)]
             else:
-                f_input = torch.cat((vk, omegak, uk), dim=1)  # [vx, vy, ωz, ux, uy, uθ]
+                f_input = torch.cat((vk, omegak, uk_used), dim=1)  # [vx, vy, ωz, u_inputs]
             external_forces = self.force_mlp(f_input)  # Neural network output [fx, fy, τz]
             
             # Split forces and torques
@@ -122,28 +130,31 @@ class PlanarPhysORD(torch.nn.Module):
             fRk_minus = c * self.h * fR          # Torque contribution at current timestep
             fRk_plus = (1 - c) * self.h * fR     # Torque contribution at next timestep
 
-            # Apply rotation matrix R_t to forces at current timestep
+            # Apply rotation matrix R_t to forces at current timestep, Rt is (bs, 2, 2)
+            # and fxk_minus is (bs, 2)
             fxk_minus_world = torch.matmul(R_t, fxk_minus.unsqueeze(-1)).squeeze(-1)
 
             # Convert to proper tensor shapes for matrix operations
-            fxk_minus_world = fxk_minus_world.unsqueeze(-1)  # (bs, 2, 1)
-            fRk_minus = fRk_minus.unsqueeze(-1)  # (bs, 1, 1)
-            fRk_plus = fRk_plus.unsqueeze(-1)    # (bs, 1, 1)
+            # fxk_minus_world = fxk_minus_world.unsqueeze(-1)  # (bs, 2, 1)
+            # fRk_minus = fRk_minus.unsqueeze(-1)  # (bs, 1, 1)
+            # fRk_plus = fRk_plus.unsqueeze(-1)    # (bs, 1, 1)
             
             # Compute momenta
-            pxk = torch.squeeze(torch.matmul(Mx, vk.unsqueeze(-1)), dim=2)
-            pRk = torch.squeeze(torch.matmul(MR, omegak.unsqueeze(-1)), dim=2)
+            pxk = self.m * vk
+            pRk = self.Iz * omegak
             
             # Position updates (simplified - no potential energy terms)
             # x_{t+1} = x_t + h*vx_t + h²/m * R_t * f_x^-
             # y_{t+1} = y_t + h*vy_t + h²/m * R_t * f_y^-
             xyk_next = xyk + self.h * vk + \
-                       self.h * torch.squeeze(torch.matmul(Mx_inv, fxk_minus_world))
+                       self.h * fxk_minus_world/self.m
 
             # Rotation update (simplified to scalar angle)
             # θ_{t+1} = θ_t + h*ωz_t + h²/I_z * τz^-
             thetak_next = thetak + self.h * omegak + \
-                         self.h * torch.squeeze(torch.matmul(MR_inv, fRk_minus))
+                         self.h * fRk_minus/self.Iz
+            # Bring thetak_next in range [-π, π]
+            thetak_next = (thetak_next + np.pi) % (2 * np.pi) - np.pi
 
             # Compute R_{t+1} rotation matrix for next timestep force transformation
             cos_theta_t_plus_1 = torch.cos(thetak_next.squeeze(-1))  # Next angle
@@ -164,13 +175,13 @@ class PlanarPhysORD(torch.nn.Module):
 
             # Velocity updates (simplified - no potential energy terms)
             # m*v_{t+1} = m*v_t + R_t*f^- + R_{t+1}*f^+
-            pxk_next = pxk + torch.squeeze(fxk_minus_world) + fxk_plus_world
-            vk_next = torch.squeeze(torch.matmul(Mx_inv, pxk_next.unsqueeze(-1)), dim=-1)
+            pxk_next = pxk + fxk_minus_world + fxk_plus_world
+            vk_next = pxk_next/self.m
             
             # Angular velocity update
             # I_z*ω_{t+1} = I_z*ω_t + f_θ^- + f_θ^+  
-            pRk_next = pRk + torch.squeeze(fRk_minus) + torch.squeeze(fRk_plus)
-            omegak_next = torch.squeeze(torch.matmul(MR_inv, pRk_next.unsqueeze(-1)), dim=-1)
+            pRk_next = pRk + fRk_minus + fRk_plus
+            omegak_next = pRk_next/self.Iz
             
             # Combine velocity components
             twist_k_next = torch.cat((vk_next, omegak_next), dim=1)
