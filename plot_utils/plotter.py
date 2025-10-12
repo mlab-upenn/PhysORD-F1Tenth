@@ -3,33 +3,36 @@ import matplotlib.pyplot as plt
 import torch
 from typing import Dict, Tuple
 
-def detect_motion_cases(velocities: np.ndarray, threshold: float = 0.1) -> str:
+def detect_motion_cases(velocities: np.ndarray, threshold: float = 2.5, dt: float = 0.1) -> str:
     """
     Detect motion case based on velocity changes.
 
     Args:
-        velocities: Array of velocity magnitudes over time [timesteps]
-        threshold: Threshold for detecting acceleration/deceleration
+        velocities: Array of velocity vectors over time [timesteps, (vx, vy)]
+        threshold: Threshold for detecting acceleration.
+        dt: Time step for calculating acceleration
 
     Returns:
-        Motion case: 'accelerating', 'decelerating', or 'uniform'
+        Motion case: 'accelerating', or 'uniform'
     """
     if len(velocities) < 2:
         return 'uniform'
 
-    # Calculate velocity changes
-    vel_changes = np.diff(velocities)
-    mean_change = np.mean(vel_changes)
+    # Calculate accelerations from velocity changes
+    accelerations = np.diff(velocities, axis=0) / dt
+    accel_magnitudes = np.linalg.norm(accelerations, axis=1)
 
-    dt = 0.1  # time step
-    if mean_change/dt > threshold:
-        return 'accelerating'
-    elif mean_change/dt < -threshold:
-        return 'decelerating'
-    else:
+    # Determine motion case based on mean acceleration
+    mean_acceleration = np.mean(accel_magnitudes)
+    print(f"Mean acceleration: {mean_acceleration:.4f} m/s²")
+
+    if mean_acceleration < threshold:
         return 'uniform'
+    else:
+        return "accelerating"
 
-def detect_path_cases(trajectory: np.ndarray, threshold_straight: float = 0.05) -> str:
+
+def detect_path_cases(trajectory: np.ndarray, threshold_straight: float = 0.2) -> str:
     """
     Detect path case based on angular velocities.
 
@@ -45,27 +48,29 @@ def detect_path_cases(trajectory: np.ndarray, threshold_straight: float = 0.05) 
 
     # Determine if 2D or 3D based on trajectory features
     if trajectory.shape[1] >= 18:  # 3D case
-        angular_velocities = trajectory[:, 15:18]  # omega_x, omega_y, omega_z
-        angular_speeds = np.linalg.norm(angular_velocities, axis=1)
+        angular_velocities = trajectory[:, 17]  # omega_z
+        angular_speeds = np.abs(angular_velocities)
     else:  # 2D case
         angular_speeds = np.abs(trajectory[:, 6])  # omega_z only
 
     mean_angular_speed = np.mean(angular_speeds)
+    print(f"Mean angular speed: {mean_angular_speed:.4f} rad/s")
 
     # Check angular speed magnitude
     if mean_angular_speed < threshold_straight:
         return 'straight'
-    elif mean_angular_speed < 0.5:  # Moderate turning
+    elif mean_angular_speed < 0.35:  # Moderate turning
         return 'slight_turn'
     else:
         return 'continuous_turn'
 
-def calculate_trajectory_stats(trajectory: np.ndarray) -> Dict[str, float]:
+def calculate_trajectory_stats(trajectory: np.ndarray, dt: float = 0.1) -> Dict[str, float]:
     """
     Calculate statistics for a trajectory.
 
     Args:
         trajectory: Array of positions/states over time [timesteps, features]
+        dt: Time step for calculating acceleration
 
     Returns:
         Dictionary with speed and acceleration statistics
@@ -76,36 +81,30 @@ def calculate_trajectory_stats(trajectory: np.ndarray) -> Dict[str, float]:
 
     # Use proper velocity indices based on trajectory type
     if trajectory.shape[1] >= 15:  # 3D case
-        velocities = trajectory[:, 12:15]  # vx, vy, vz
+        velocities = trajectory[:, 12:14]  # vx, vy, vz
     else:  # 2D case
         velocities = trajectory[:, 4:6]  # vx, vy
 
-    speeds = np.linalg.norm(velocities, axis=1)
-
     # Calculate accelerations from velocity changes
-    dt = 0.1  # time step
     accelerations = np.diff(velocities, axis=0) / dt
     accel_magnitudes = np.linalg.norm(accelerations, axis=1)
 
     # Determine motion case and calculate signed acceleration for decelerating cases
-    motion_case = detect_motion_cases(speeds)
     mean_acceleration = np.mean(accel_magnitudes)
 
-    if motion_case == 'decelerating':
-        # For decelerating trajectories, show negative acceleration
-        mean_acceleration = -mean_acceleration
-
+    speeds = np.linalg.norm(velocities, axis=1)
     return {
         'mean_speed': np.mean(speeds),
         'mean_acceleration': mean_acceleration
     }
 
-def classify_trajectory(trajectory: np.ndarray) -> Tuple[str, str]:
+def classify_trajectory(trajectory: np.ndarray, dt: float = 0.1) -> Tuple[str, str]:
     """
     Classify a trajectory into motion and path cases.
 
     Args:
         trajectory: Array of positions/states over time [timesteps, features] or [timesteps, batch, features]
+        dt: Time step for calculating acceleration
 
     Returns:
         Tuple of (motion_case, path_case)
@@ -118,19 +117,18 @@ def classify_trajectory(trajectory: np.ndarray) -> Tuple[str, str]:
 
     # Use proper velocity indices based on trajectory type
     if traj.shape[1] >= 15:  # 3D case
-        velocities = traj[:, 12:15]  # vx, vy, vz
+        velocities = traj[:, 12:14]  # vx, vy
     else:  # 2D case
         velocities = traj[:, 4:6]  # vx, vy
 
-    speeds = np.linalg.norm(velocities, axis=1)
-
-    motion_case = detect_motion_cases(speeds)
+    motion_case = detect_motion_cases(velocities, dt=dt)
     path_case = detect_path_cases(traj)
 
     return motion_case, path_case
 
 def find_representative_trajectories(gt_data: torch.Tensor, pred_data: torch.Tensor,
-                                   num_samples: int = 1000) -> Dict[str, Dict[str, list]]:
+                                   num_samples: int = 1000, dt: float = 0.1,
+                                   max_error: float = 2.0) -> Dict[str, Dict[str, list]]:
     """
     Find representative trajectories for each motion and path case combination.
 
@@ -138,11 +136,14 @@ def find_representative_trajectories(gt_data: torch.Tensor, pred_data: torch.Ten
         gt_data: Ground truth trajectories [timesteps, batch, features]
         pred_data: Predicted trajectories [timesteps, batch, features]
         num_samples: Number of trajectories to sample for classification
+        dt: Time step for calculating acceleration
+        max_error: Maximum allowed position error in meters (default: 2.0)
 
     Returns:
         Dictionary mapping case combinations to trajectory indices
     """
     gt_np = gt_data.cpu().numpy() if isinstance(gt_data, torch.Tensor) else gt_data
+    pred_np = pred_data.cpu().numpy() if isinstance(pred_data, torch.Tensor) else pred_data
 
     # Sample trajectories for efficiency
     batch_size = gt_np.shape[1]
@@ -150,18 +151,28 @@ def find_representative_trajectories(gt_data: torch.Tensor, pred_data: torch.Ten
 
     case_trajectories = {
         'accelerating': {'straight': [], 'slight_turn': [], 'continuous_turn': []},
-        'uniform': {'straight': [], 'slight_turn': [], 'continuous_turn': []},
-        'decelerating': {'straight': [], 'slight_turn': [], 'continuous_turn': []}
+        'uniform': {'straight': [], 'slight_turn': [], 'continuous_turn': []}
     }
 
     for idx in sample_indices:
-        traj = gt_np[:, idx, :]
+        traj_gt = gt_np[:, idx, :]
+        traj_pred = pred_np[:, idx, :]
+
+        # Calculate position error (Euclidean distance)
+        gt_pos = traj_gt[:, :2]  # x, y positions
+        pred_pos = traj_pred[:, :2]  # x, y positions
+        position_errors = np.linalg.norm(gt_pos - pred_pos, axis=1)
+        max_position_error = np.max(position_errors)
+
+        # Skip trajectories with error exceeding threshold
+        if max_position_error > max_error:
+            continue
 
         # Calculate mean speed and filter out slow trajectories
-        if traj.shape[1] >= 15:  # 3D case
-            velocities = traj[:, 12:15]  # vx, vy, vz
+        if traj_gt.shape[1] >= 15:  # 3D case
+            velocities = traj_gt[:, 12:15]  # vx, vy, vz
         else:  # 2D case
-            velocities = traj[:, 4:6]  # vx, vy
+            velocities = traj_gt[:, 4:6]  # vx, vy
 
         speeds = np.linalg.norm(velocities, axis=1)
         mean_speed = np.mean(speeds)
@@ -170,7 +181,7 @@ def find_representative_trajectories(gt_data: torch.Tensor, pred_data: torch.Ten
         if mean_speed < 0.9:
             continue
 
-        motion_case, path_case = classify_trajectory(traj)
+        motion_case, path_case = classify_trajectory(traj_gt, dt=dt)
 
         if len(case_trajectories[motion_case][path_case]) < 3:  # Limit to 3 examples per case
             case_trajectories[motion_case][path_case].append(idx)
@@ -238,7 +249,8 @@ def plot_trajectory_comparison(gt_traj: np.ndarray, pred_traj: np.ndarray,
 
 def create_comprehensive_plot(gt_data: torch.Tensor, pred_data: torch.Tensor,
                             save_path: str = 'trajectory_comparison.png',
-                            figsize: Tuple[int, int] = (16, 12)) -> None:
+                            figsize: Tuple[int, int] = (16, 12), dt: float = 0.1,
+                            max_error: float = 2.0) -> None:
     """
     Create comprehensive plot comparing ground truth and predicted trajectories
     across different motion and path cases.
@@ -248,15 +260,17 @@ def create_comprehensive_plot(gt_data: torch.Tensor, pred_data: torch.Tensor,
         pred_data: Predicted trajectories [timesteps, batch, features]
         save_path: Path to save the plot
         figsize: Figure size (width, height)
+        dt: Time step for calculating acceleration
+        max_error: Maximum allowed position error in meters (default: 2.0)
     """
     # Find representative trajectories
-    case_trajectories = find_representative_trajectories(gt_data, pred_data)
+    case_trajectories = find_representative_trajectories(gt_data, pred_data, dt=dt, max_error=max_error)
 
     # Create subplot grid
-    motion_cases = ['accelerating', 'uniform', 'decelerating']
+    motion_cases = ['accelerating', 'uniform']
     path_cases = ['straight', 'slight_turn', 'continuous_turn']
 
-    fig, axes = plt.subplots(3, 3, figsize=figsize)
+    fig, axes = plt.subplots(len(motion_cases),len(path_cases), figsize=figsize)
     fig.suptitle('Ground Truth vs PhysORD Predictions: Motion and Path Analysis', fontsize=16)
 
     # Column titles
@@ -286,7 +300,7 @@ def create_comprehensive_plot(gt_data: torch.Tensor, pred_data: torch.Tensor,
                 pred_traj = pred_np[:, idx, :]
 
                 # Calculate stats
-                stats = calculate_trajectory_stats(gt_traj)
+                stats = calculate_trajectory_stats(gt_traj, dt=dt)
 
                 # Plot comparison
                 plot_trajectory_comparison(gt_traj, pred_traj, motion_case, path_case, ax, stats)
@@ -330,6 +344,9 @@ if __name__ == "__main__":
     parser.add_argument('--use_v_gap', action='store_true', help='Whether model uses v_gap (RPM difference)')
     parser.add_argument('--figsize', type=int, nargs=2, default=[16, 12], help='Figure size (width height)')
     parser.add_argument('--no_show', action='store_true', help='Do not display plots, only save them')
+    parser.add_argument('--dt', '--time_step', type=float, default=0.1, help='Time step/dt for trajectory calculations')
+    parser.add_argument('--control_dim', type=int, choices=[2, 3], default=3, help='Number of control input dimensions (2 or 3)')
+    parser.add_argument('--max_error', type=float, default=2.0, help='Maximum allowed position error in meters for trajectory filtering (default: 2.0)')
     args = parser.parse_args()
 
     # Set device
@@ -342,9 +359,9 @@ if __name__ == "__main__":
     # Load model
     print(f"Loading {args.model_type} model from: {args.model_path}")
     if args.model_type == '2d':
-        model = PlanarPhysORD(device=device, time_step=0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
+        model = PlanarPhysORD(device=device, time_step=args.dt, udim=2, use_v_gap=args.use_v_gap).to(device)
     else:
-        model = PhysORD(device=device, use_dVNet=True, time_step=0.1, udim=3, use_v_gap=args.use_v_gap).to(device)
+        model = PhysORD(device=device, use_dVNet=True, time_step=args.dt, udim=args.control_dim, use_v_gap=args.use_v_gap).to(device)
 
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
@@ -389,7 +406,9 @@ if __name__ == "__main__":
 
     # Generate comprehensive plot
     print("Creating comprehensive analysis plot...")
+    print(f"Filtering trajectories with max error > {args.max_error}m")
     save_path = os.path.join(args.save_dir, 'comprehensive_analysis.png')
-    create_comprehensive_plot(gt_data, pred_data, save_path=save_path, figsize=tuple(args.figsize))
+    create_comprehensive_plot(gt_data, pred_data, save_path=save_path, figsize=tuple(args.figsize),
+                            dt=args.dt, max_error=args.max_error)
     print(f"Comprehensive plot saved to: {save_path}")
     print(f"All plots saved to: {args.save_dir}")
