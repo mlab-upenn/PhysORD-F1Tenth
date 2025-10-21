@@ -15,9 +15,9 @@ class ForceMLP(nn.Module):
         super(ForceMLP, self).__init__()
         self.layers = nn.Sequential(
             nn.Linear(input_size, hidden_size),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(hidden_size, output_size)
         )
 

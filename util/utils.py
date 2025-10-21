@@ -10,6 +10,19 @@ def hat_map_batch(a):
     a_hat = a_hat.view(-1,3,3)
     return a_hat
 
+def normalize_theta(theta):
+    """
+    Normalize angle theta to be within [-pi, pi] in a differentiable manner.
+
+    Args:
+        theta: Tensor of angles in radians
+
+    Returns:
+        normalized_theta: Tensor of angles normalized to [-pi, pi]
+    """
+    normalized_theta = torch.remainder(theta + np.pi, 2 * np.pi) - np.pi
+    return normalized_theta
+
 ################################ geodesic ################################
 def normalize_vector(v, return_mag=False):
     batch = v.shape[0]
