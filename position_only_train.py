@@ -373,11 +373,11 @@ if __name__ == "__main__":
                        help='Path to pretrained model weights')
 
     # Training settings
-    parser.add_argument('--learn_rate', default=5e-2, type=float,
+    parser.add_argument('--learn_rate', default=1e-2, type=float,
                        help='Learning rate for Adam optimizer')
     parser.add_argument('--num_epochs', default=5000, type=int,
                        help='Maximum number of training epochs')
-    parser.add_argument('--batch_size', default=32, type=int,
+    parser.add_argument('--batch_size', default=65, type=int,
                        help='Training batch size (number of trajectories)')
     parser.add_argument('--seed', default=0, type=int,
                        help='Random seed for reproducibility')
