@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 ROS1 script to subscribe to reachtruck topics and log data to CSV.
-Logs data at the frequency of /cmd_vel_stamped topic.
+Logs data at the frequency of synchronized /cmd_vel_stamped and /lts_ng/lts_status topics.
 """
 
 import rospy
@@ -11,6 +11,7 @@ from datetime import datetime
 from geometry_msgs.msg import TwistStamped, PoseWithCovariance
 from std_msgs.msg import Float32
 from ipa_navigation_msgs.msg import LTSNGStatus
+import message_filters
 
 
 class ReachtruckDataLogger:
@@ -24,7 +25,6 @@ class ReachtruckDataLogger:
         # Latest messages from each topic
         self.latest_speed = None
         self.latest_steer_angle = None
-        self.latest_lts_status = None
 
         # CSV file setup
         if output_csv_path is None:
@@ -51,36 +51,42 @@ class ReachtruckDataLogger:
 
         rospy.loginfo(f"Logging data to: {output_csv_path}")
 
-        # Initialize subscribers
-        self.cmd_vel_sub = rospy.Subscriber(
-            '/cmd_vel_stamped',
-            TwistStamped,
-            self.cmd_vel_callback,
-            queue_size=1
-        )
-
+        # Initialize subscribers for speed and steer angle (non-synchronized)
         self.speed_sub = rospy.Subscriber(
             '/firmware/feedback/speed',
             Float32,
             self.speed_callback,
-            queue_size=1
+            queue_size=20
         )
 
         self.steer_angle_sub = rospy.Subscriber(
             '/firmware/feedback/steer_angle',
             Float32,
             self.steer_angle_callback,
-            queue_size=1
+            queue_size=20
         )
 
-        self.lts_status_sub = rospy.Subscriber(
+        # Initialize message_filters subscribers for synchronization
+        self.cmd_vel_sub = message_filters.Subscriber(
+            '/cmd_vel_stamped',
+            TwistStamped
+        )
+
+        self.lts_status_sub = message_filters.Subscriber(
             '/lts_ng/lts_status',
-            LTSNGStatus,
-            self.lts_status_callback,
-            queue_size=1
+            LTSNGStatus
         )
 
-        rospy.loginfo("ReachtruckDataLogger initialized and ready")
+        # Create approximate time synchronizer
+        # slop parameter defines the maximum time difference (in seconds) between messages
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [self.cmd_vel_sub, self.lts_status_sub],
+            queue_size=20,
+            slop=0.1  # 100 ms tolerance
+        )
+        self.ts.registerCallback(self.synchronized_callback)
+
+        rospy.loginfo("ReachtruckDataLogger initialized and ready with message synchronization")
 
     def speed_callback(self, msg):
         """Callback for measured speed."""
@@ -90,37 +96,33 @@ class ReachtruckDataLogger:
         """Callback for measured steering angle."""
         self.latest_steer_angle = msg.data
 
-    def lts_status_callback(self, msg):
-        """Callback for localization status."""
-        self.latest_lts_status = msg
-
-    def cmd_vel_callback(self, msg):
+    def synchronized_callback(self, cmd_vel_msg, lts_status_msg):
         """
-        Callback for command velocity (control inputs).
-        Logs data to CSV when this message is received.
+        Callback for synchronized /cmd_vel_stamped and /lts_ng/lts_status messages.
+        Logs data to CSV when synchronized messages are received.
+
+        Args:
+            cmd_vel_msg: TwistStamped message from /cmd_vel_stamped
+            lts_status_msg: LTSNGStatus message from /lts_ng/lts_status
         """
-        # Extract timestamp from header
-        timestamp = msg.header.stamp.to_sec()
+        # Extract timestamp from cmd_vel header
+        timestamp = cmd_vel_msg.header.stamp.to_sec()
 
-        # Extract command values
-        cmd_speed = msg.twist.linear.x
-        cmd_steer_angle = msg.twist.angular.z
+        # Extract command values from synchronized cmd_vel_msg
+        cmd_speed = cmd_vel_msg.twist.linear.x
+        cmd_steer_angle = cmd_vel_msg.twist.angular.z
 
-        # Get measured values (use None if not yet received)
+        # Get latest measured values (use NaN if not yet received)
         measured_speed = self.latest_speed if self.latest_speed is not None else float('nan')
         measured_steer_angle = self.latest_steer_angle if self.latest_steer_angle is not None else float('nan')
 
-        # Extract localization data
-        if self.latest_lts_status is not None:
-            x = self.latest_lts_status.pose.pose.position.x
-            y = self.latest_lts_status.pose.pose.position.y
-            orientation_x = self.latest_lts_status.pose.pose.orientation.x
-            orientation_y = self.latest_lts_status.pose.pose.orientation.y
-            orientation_z = self.latest_lts_status.pose.pose.orientation.z
-            orientation_w = self.latest_lts_status.pose.pose.orientation.w
-        else:
-            x = y = float('nan')
-            orientation_x = orientation_y = orientation_z = orientation_w = float('nan')
+        # Extract localization data from synchronized lts_status_msg
+        x = lts_status_msg.pose.pose.position.x
+        y = lts_status_msg.pose.pose.position.y
+        orientation_x = lts_status_msg.pose.pose.orientation.x
+        orientation_y = lts_status_msg.pose.pose.orientation.y
+        orientation_z = lts_status_msg.pose.pose.orientation.z
+        orientation_w = lts_status_msg.pose.pose.orientation.w
 
         # Write row to CSV
         self.csv_writer.writerow([
