@@ -7,7 +7,7 @@ import numpy as np
 import util.utils as utils
 
 
-class PositionOnlyForceModelHelper:
+class PositionOnlyForceModelHelper(torch.nn.Module):
     """
     This helper class constructs the external force model for the planar position-only PhysORD.
     It builds a neural network that predicts external forces and torque based on the current state,
@@ -15,7 +15,7 @@ class PositionOnlyForceModelHelper:
     This class will be helpful for experimenting with different force model architectures and input features.
     """
     def __init__(
-            self, 
+            self,
             use_feedback=True,
             udim=2,
             past_history_input=2,
@@ -34,6 +34,7 @@ class PositionOnlyForceModelHelper:
             feedback_steer_dim: Dimension of feedback steering measurement (default 1 for planar)
             hidden_size: Hidden layer size for the force model MLP
         """
+        super(PositionOnlyForceModelHelper, self).__init__()
         self.use_feedback = use_feedback
         self.udim = udim
         self.past_history_input = past_history_input
