@@ -9,7 +9,7 @@ import csv
 import os
 from datetime import datetime
 from geometry_msgs.msg import TwistStamped, PoseWithCovariance
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Float64
 from ipa_navigation_msgs.msg import LTSNGStatus
 import message_filters
 
@@ -25,6 +25,8 @@ class ReachtruckDataLogger:
         # Latest messages from each topic
         self.latest_speed = None
         self.latest_steer_angle = None
+        self.latest_cmd_speed = None
+        self.latest_cmd_steer_angle = None
 
         # CSV file setup
         if output_csv_path is None:
@@ -66,6 +68,20 @@ class ReachtruckDataLogger:
             queue_size=20
         )
 
+        # Subscribers for low level commands
+        self.command_speed = rospy.Subscriber(
+            '/command/speed',
+            Float64,
+            self.command_speed_callback,
+            queue_size=20
+        )
+        self.command_steer_angle = rospy.Subscriber(
+            '/command/steer',
+            Float64,
+            self.command_steer_angle_callback,
+            queue_size=20
+        )
+
         # Initialize message_filters subscribers for synchronization
         self.cmd_vel_sub = message_filters.Subscriber(
             '/cmd_vel_stamped',
@@ -96,6 +112,14 @@ class ReachtruckDataLogger:
         """Callback for measured steering angle."""
         self.latest_steer_angle = msg.data
 
+    def command_speed_callback(self, msg):
+        """Callback for commanded speed."""
+        self.latest_cmd_speed = msg.data
+
+    def command_steer_angle_callback(self, msg):
+        """Callback for commanded steering angle."""
+        self.latest_cmd_steer_angle = msg.data
+
     def synchronized_callback(self, cmd_vel_msg, lts_status_msg):
         """
         Callback for synchronized /cmd_vel_stamped and /lts_ng/lts_status messages.
@@ -109,8 +133,13 @@ class ReachtruckDataLogger:
         timestamp = cmd_vel_msg.header.stamp.to_sec()
 
         # Extract command values from synchronized cmd_vel_msg
+        # NOTE: Override with latest command values from low level command topics if available
         cmd_speed = cmd_vel_msg.twist.linear.x
         cmd_steer_angle = cmd_vel_msg.twist.angular.z
+        if self.latest_cmd_speed is not None:
+            cmd_speed = self.latest_cmd_speed
+        if self.latest_cmd_steer_angle is not None:
+            cmd_steer_angle = self.latest_cmd_steer_angle
 
         # Get latest measured values (use NaN if not yet received)
         measured_speed = self.latest_speed if self.latest_speed is not None else float('nan')
