@@ -81,7 +81,7 @@ def data_load(args):
 
     if args.custom_data_path:
         print(f"Loading custom data: {args.custom_data_path}")
-        custom_data = torch.load(args.custom_data_path)
+        custom_data = torch.load(args.custom_data_path)[:4500, :, :]
 
         # Validate data shape
         print(f"Data shape: {custom_data.shape}")
@@ -153,7 +153,9 @@ def train(args, train_data, val_data):
         device=device,
         udim=args.control_dim,
         time_step=args.time_step,
-        past_history_input=args.past_history_input
+        past_history_input=args.past_history_input,
+        hidden_size=args.hidden_size,
+        use_feedback=args.use_feedback
     ).to(device)
 
     if args.pretrained is not None:
@@ -164,7 +166,7 @@ def train(args, train_data, val_data):
     print(f'Model contains {num_parm} parameters')
 
     # Optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), args.learn_rate, weight_decay=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), args.learn_rate)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=1.0)
 
     print(f"{args.exp_name}: Start training")
@@ -172,6 +174,8 @@ def train(args, train_data, val_data):
     print(f"  Timesteps: {args.timesteps}")
     print(f"  Learning rate: {args.learn_rate}")
     print(f"  Past history input: {args.past_history_input}")
+    print(f"  Hidden size: {args.hidden_size}")
+    print(f"  Use feedback: {args.use_feedback}")
 
     # Training statistics
     stats = {
@@ -369,6 +373,12 @@ if __name__ == "__main__":
                        help='Number of control input dimensions (default: 2 for speed and steer)')
     parser.add_argument('--time_step', default=0.1, type=float,
                        help='Time step for model integration (seconds)')
+    parser.add_argument('--hidden_size', default=64, type=int,
+                       help='Hidden layer size for the force model MLP (default: 64)')
+    parser.add_argument('--use_feedback', action='store_true', default=True,
+                       help='Use feedback measurements in the force model (default: True)')
+    parser.add_argument('--no_feedback', action='store_false', dest='use_feedback',
+                       help='Disable feedback measurements in the force model')
     parser.add_argument('--pretrained', default=None, type=str,
                        help='Path to pretrained model weights')
 

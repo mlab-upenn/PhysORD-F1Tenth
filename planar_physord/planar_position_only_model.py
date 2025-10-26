@@ -70,10 +70,10 @@ class PositionOnlyForceModelHelper(torch.nn.Module):
         """
         bs, past_history_input_size, state_dim = x.shape
 
-        assert(state_dim == self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim,
-            f"Expected state_dim {self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim}, got {state_dim}")
-        assert(past_history_input_size == self.past_history_input,
-            f"Expected past_history_input_size {self.past_history_input}, got {past_history_input_size}")
+        assert state_dim == self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim, \
+            f"Expected state_dim {self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim}, got {state_dim}"
+        assert past_history_input_size == self.past_history_input, \
+            f"Expected past_history_input_size {self.past_history_input}, got {past_history_input_size}"
         
         # Don't pass absolute pose information, treat the latest pose as origin with zero orientation
         # Reposition + reorient all past poses relative to the latest pose
@@ -88,7 +88,7 @@ class PositionOnlyForceModelHelper(torch.nn.Module):
         x[:, :, 2] = utils.normalize_theta(x[:, :, 2])  # [bs, past_history_input_size]
         
         if self.use_feedback:
-            x_flat = x.reshape(bs, -1)  # flatten past history inputs
+            x_flat = x.reshape(bs, -1).clone()  # flatten past history inputs
         else:
             # Use only pose information and control inputs
             posedim = self.posedim
@@ -122,15 +122,17 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
     """
     
     def __init__(
-            self, 
-            device=None, 
-            udim=2, 
+            self,
+            device=None,
+            udim=2,
             time_step=0.1,
             past_history_input=2,
+            hidden_size=64,
+            use_feedback=True,
         ):
         super(PlanarPositionOnlyPhysORD, self).__init__()
         self.device = device
-        
+
         # Dimensional parameters for planar motion
         self.xdim = 2           # 2D position (x, y)
         self.thetadim = 1      # 1D rotation (θ about z-axis)
@@ -138,19 +140,19 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
         self.feedback_speed_dim = 1      # 1D linear velocity (vx, vy combined as speed) measurement
         self.feedback_steer_dim = 1      # 1D steering angle measurement through sensor
         self.udim = udim        # Control input dimension
-        
+
         self.h = time_step  # Time step for integration
         self.past_history_input = past_history_input  # Past history input size
 
         # External force model helper
         self.force_model_helper = PositionOnlyForceModelHelper(
-            use_feedback=False,
+            use_feedback=use_feedback,
             udim=self.udim,
             past_history_input=past_history_input,
             pose_dim=self.posedim,
             feedback_speed_dim=self.feedback_speed_dim,
             feedback_steer_dim=self.feedback_steer_dim,
-            hidden_size=128,
+            hidden_size=hidden_size,
         )
 
 
@@ -169,10 +171,10 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
         with torch.set_grad_enabled(enable_grad):
             bs, past_history_input_size, state_dim = x.shape
 
-            assert(state_dim == self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim,
-                f"Expected state_dim {self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim}, got {state_dim}")
-            assert(past_history_input_size == self.past_history_input,
-                f"Expected past_history_input_size {self.past_history_input}, got {past_history_input_size}")
+            assert state_dim == self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim, \
+                f"Expected state_dim {self.posedim + self.feedback_speed_dim + self.feedback_steer_dim + self.udim}, got {state_dim}"
+            assert past_history_input_size == self.past_history_input, \
+                f"Expected past_history_input_size {self.past_history_input}, got {past_history_input_size}"
             
             xdim = self.xdim
             thetadim = self.thetadim
@@ -225,8 +227,16 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
             xy_next = torch.cat((xy[:, 1:, :], xy_k_p_1), dim=1)  # [bs, past_history_input_size, 2]
             theta_next = torch.cat((theta[:, 1:, :], theta_k_p_1), dim=1)  # [bs, past_history_input_size, 1]
 
-            # NOTE: Feedback values remain constant through time, as we won't model their dynamics here
-            x_next = torch.cat((xy_next, theta_next, feedback_speed, feedback_steer, u), dim=2)  # [bs, past_history_input_size, state_dim]
+            # NOTE: Feedback values will be 0, as we won't model their dynamics here
+            feedback_speed_next = torch.cat(
+                (feedback_speed[:, 1:, :], torch.zeros(bs, 1, feedback_speed_dim, device=x.device, dtype=x.dtype)),
+                dim=1,
+            )  # [bs, past_history_input_size, feedback_speed_dim]
+            feedback_steer_next = torch.cat(
+                (feedback_steer[:, 1:, :], torch.zeros(bs, 1, feedback_steer_dim, device=x.device, dtype=x.dtype)),
+                dim=1,
+            )  # [bs, past_history_input_size, feedback_steer_dim]
+            x_next = torch.cat((xy_next, theta_next, feedback_speed_next, feedback_steer_next, u), dim=2)  # [bs, past_history_input_size, state_dim]
 
             return x_next
 
