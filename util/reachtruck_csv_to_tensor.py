@@ -57,6 +57,8 @@ def process_csv_to_state_tensor(csv_file, timesteps=20, past_history_input=2):
         # Control inputs
         cmd_speed = df['cmd_speed'].values.reshape(-1, 1)  # Shape: (N, 1)
         cmd_steer = df['cmd_steer_angle'].values.reshape(-1, 1)  # Shape: (N, 1)
+        # Normalize cmd_steer by dividing by 90.0.
+        cmd_steer = cmd_steer / 90.0
 
         # Convert quaternions to yaw angle (rotation around z-axis)
         rot = Rotation.from_quat(quaternion)
@@ -95,7 +97,7 @@ def process_csv_to_state_tensor(csv_file, timesteps=20, past_history_input=2):
         state_filtered = state[valid_indices]
 
         # Create sequences of length (timesteps + past_history_input)
-        sequences = arrange_data_sample(state_filtered, sequence_length)
+        sequences = arrange_data_sample(state_filtered, sequence_length) # Shape: (num_sequences, sequence_length, 7)
 
         if sequences.shape[0] == 0:
             print(f"Skipping {csv_file}: no valid sequences generated")
