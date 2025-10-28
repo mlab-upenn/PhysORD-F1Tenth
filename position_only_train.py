@@ -81,7 +81,7 @@ def data_load(args):
 
     if args.custom_data_path:
         print(f"Loading custom data: {args.custom_data_path}")
-        custom_data = torch.load(args.custom_data_path)[:4500, :, :]
+        custom_data = torch.load(args.custom_data_path)
 
         # Validate data shape
         print(f"Data shape: {custom_data.shape}")
@@ -167,7 +167,7 @@ def train(args, train_data, val_data):
 
     # Optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), args.learn_rate)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=1.0)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.9)
 
     print(f"{args.exp_name}: Start training")
     print(f"  Trajectories: {train_data.shape[0]}")
@@ -235,6 +235,9 @@ def train(args, train_data, val_data):
             optimizer.step()
 
         train_time = time.time() - t_epoch
+
+        # Average the training loss across all batches
+        epoch_loss = epoch_loss / steps_total
 
         # Evaluation
         t_eval = time.time()
@@ -323,6 +326,12 @@ def train(args, train_data, val_data):
 
         # Step scheduler
         scheduler.step()
+
+        # Ensure learning rate doesn't drop below minimum threshold
+        min_lr = 1e-4
+        for param_group in optimizer.param_groups:
+            if param_group['lr'] < min_lr:
+                param_group['lr'] = min_lr
 
         # Print progress
         if epoch % args.print_every == 0:
