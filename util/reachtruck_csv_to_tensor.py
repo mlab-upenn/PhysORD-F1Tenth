@@ -191,6 +191,9 @@ def process_all_csvs_to_tensor(csv_dir, output_path, timesteps=20, past_history_
     torch.save(combined_sequences, output_path)
     print(f"Tensor saved to: {output_path}")
 
+    # Assert no NaN values
+    assert not torch.isnan(combined_sequences).any(), "Final tensor contains NaN values"
+
     return combined_sequences
 
 

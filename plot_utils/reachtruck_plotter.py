@@ -360,7 +360,7 @@ if __name__ == "__main__":
     # Load test data
     print(f"Loading test data from: {args.test_data}")
     test_data = torch.load(args.test_data, map_location=device)
-    test_data = test_data[3000:4000:, :, :]
+    test_data = test_data[500:600, :, :]
 
     # Handle different data formats
     if isinstance(test_data, dict):
@@ -406,8 +406,8 @@ if __name__ == "__main__":
         pred_data = model.evaluation(args.timesteps, test_data)
 
         # Get ground truth (excluding past history)
-        gt_data = test_data[:, args.past_history_input:, :]
-        pred_data = pred_data[:, args.past_history_input:, :]
+        gt_data = test_data[:, args.past_history_input-1:, :]
+        pred_data = pred_data[:, args.past_history_input-1:, :]
 
     print(f"Ground truth shape: {gt_data.shape}")
     print(f"Predictions shape: {pred_data.shape}")

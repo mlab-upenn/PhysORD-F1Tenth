@@ -81,7 +81,7 @@ def data_load(args):
 
     if args.custom_data_path:
         print(f"Loading custom data: {args.custom_data_path}")
-        custom_data = torch.load(args.custom_data_path)
+        custom_data = torch.load(args.custom_data_path)[100:600, :, :]  # Use a subset for training/testing
 
         # Validate data shape
         print(f"Data shape: {custom_data.shape}")
@@ -142,6 +142,8 @@ def train(args, train_data, val_data):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+    assert torch.isnan(train_data).sum() == 0, "Training data contains NaN values"
+
     # Initialize TensorBoard writer
     tensorboard_dir = os.path.join(save_fp, 'tensorboard_logs')
     writer = SummaryWriter(tensorboard_dir)
@@ -199,6 +201,8 @@ def train(args, train_data, val_data):
     batch_size = args.batch_size
     steps_total = train_data.shape[0] // batch_size + (1 if train_data.shape[0] % batch_size != 0 else 0)
 
+    torch.autograd.set_detect_anomaly(True)
+
     for epoch in range(args.num_epochs):
         model.train()
         epoch_loss = 0
@@ -228,10 +232,24 @@ def train(args, train_data, val_data):
                        model.feedback_steer_dim, model.udim]
             )
 
+            # Check for NaN/Inf in loss
+            if torch.isnan(train_loss_mini) or torch.isinf(train_loss_mini):
+                print(f"\nERROR: NaN/Inf detected at epoch {epoch}, step {step}")
+                print(f"Loss value: {train_loss_mini.item()}")
+                print(f"Target stats - min: {target.min():.4f}, max: {target.max():.4f}, mean: {target.mean():.4f}")
+                print(f"Prediction stats - min: {target_hat.min():.4f}, max: {target_hat.max():.4f}, mean: {target_hat.mean():.4f}")
+                # Save model state before crashing
+                torch.save(model.state_dict(), f'{save_fp}/model_before_nan_epoch{epoch}_step{step}.tar')
+                raise ValueError("NaN/Inf loss detected - training stopped")
+
             epoch_loss += train_loss_mini.item()
 
             # Backward pass
             train_loss_mini.backward()
+
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optimizer.step()
 
         train_time = time.time() - t_epoch
@@ -314,15 +332,30 @@ def train(args, train_data, val_data):
         writer.add_scalar('Error/Best_Error', best_error.item(), epoch)
         writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
 
-        # Log gradient and weight norms
-        for name, param in model.named_parameters():
-            if 'weight' in name:
-                weight_norm = param.data.norm(2).item()
-                writer.add_scalar(f'Weight_Norms/{name}', weight_norm, epoch)
+        # Log gradient magnitudes and weight norms for all parameters
+        total_grad_norm = 0.0
+        total_weight_norm = 0.0
+        num_params_with_grad = 0
 
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                # Weight norm (L2 norm of parameter values)
+                weight_norm = param.data.norm(2).item()
+                total_weight_norm += weight_norm ** 2
+                writer.add_scalar(f'Weights/{name}', weight_norm, epoch)
+
+                # Gradient magnitude (L2 norm of gradients)
                 if param.grad is not None:
                     grad_norm = param.grad.data.norm(2).item()
-                    writer.add_scalar(f'Gradient_Norms/{name}', grad_norm, epoch)
+                    total_grad_norm += grad_norm ** 2
+                    num_params_with_grad += 1
+                    writer.add_scalar(f'Gradients/{name}', grad_norm, epoch)
+
+        # Log total gradient and weight norms (global L2 norms)
+        total_grad_norm = np.sqrt(total_grad_norm)
+        total_weight_norm = np.sqrt(total_weight_norm)
+        writer.add_scalar('Gradients/Total_Grad_Norm', total_grad_norm, epoch)
+        writer.add_scalar('Weights/Total_Weight_Norm', total_weight_norm, epoch)
 
         # Step scheduler
         scheduler.step()
