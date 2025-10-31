@@ -88,7 +88,7 @@ class PositionOnlyForceModelHelper(torch.nn.Module):
         x[:, :, 2] = utils.normalize_theta(x[:, :, 2])  # [bs, past_history_input_size]
         
         if self.use_feedback:
-            x_flat = x.reshape(bs, -1).clone()  # flatten past history inputs
+            x_flat = x.reshape(bs, -1)  # flatten past history inputs
         else:
             # Use only pose information and control inputs
             posedim = self.posedim
@@ -165,7 +165,7 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
                state_dim = posedim + feedback_speed_dim + feedback_steer_dim + udim
 
         Returns:
-            x_next: [batch_size, past_history_input_size, posedim + feedback_speed_dim + feedback_steer_dim + udim] 
+            x_next: [batch_size, past_history_input_size, posedim + feedback_speed_dim + feedback_steer_dim + udim]
                 next state tensor constructed with the latest pose at the end and removing the oldest pose.
         """
         with torch.set_grad_enabled(enable_grad):
@@ -217,26 +217,20 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
             # Update theta using variational integrator
             theta_k = theta[:, -1, :].unsqueeze(1)  # [bs, 1, 1]
             theta_k_m_1 = theta[:, -2, :].unsqueeze(1)  # [bs, 1, 1]
-            theta_k_p_1 = (
-                2 * theta_k - theta_k_m_1 
-                + (self.h ** 2) * (tau_z).unsqueeze(1)  # [bs, 1, 1]
+            delta_theta = (
+                    utils.normalize_theta(theta_k - theta_k_m_1)
+                    + (self.h ** 2) * tau_z.unsqueeze(1)  # [bs, 1, 1]
             ) # assuming that predicted by neural net is torque / I.
-            theta_k_p_1 = utils.normalize_theta(theta_k_p_1)
+
+            theta_k_p_1 = utils.normalize_theta(
+                theta_k + delta_theta
+            )
 
             # Construct next state by appending the new pose and removing the oldest pose
             xy_next = torch.cat((xy[:, 1:, :], xy_k_p_1), dim=1)  # [bs, past_history_input_size, 2]
             theta_next = torch.cat((theta[:, 1:, :], theta_k_p_1), dim=1)  # [bs, past_history_input_size, 1]
 
-            # NOTE: Feedback values will be 0, as we won't model their dynamics here
-            feedback_speed_next = torch.cat(
-                (feedback_speed[:, 1:, :], torch.zeros(bs, 1, feedback_speed_dim, device=x.device, dtype=x.dtype)),
-                dim=1,
-            )  # [bs, past_history_input_size, feedback_speed_dim]
-            feedback_steer_next = torch.cat(
-                (feedback_steer[:, 1:, :], torch.zeros(bs, 1, feedback_steer_dim, device=x.device, dtype=x.dtype)),
-                dim=1,
-            )  # [bs, past_history_input_size, feedback_steer_dim]
-            x_next = torch.cat((xy_next, theta_next, feedback_speed_next, feedback_steer_next, u), dim=2)  # [bs, past_history_input_size, state_dim]
+            x_next = torch.cat((xy_next, theta_next, feedback_speed, feedback_steer, u), dim=2)  # [bs, past_history_input_size, state_dim]
 
             return x_next
 
@@ -300,6 +294,3 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
             x_seq = torch.cat((x_seq, curx[:, -1:, :]), dim=1)
 
         return x_seq
-
-        
-
