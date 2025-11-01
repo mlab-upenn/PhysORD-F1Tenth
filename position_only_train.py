@@ -22,21 +22,20 @@ import time
 from torch.utils.tensorboard import SummaryWriter
 from planar_physord.planar_position_only_model import PlanarPositionOnlyPhysORD
 from util.data_process import get_model_parm_nums
-from util.utils import normalize_theta
 
 
 def position_only_loss(target, target_hat, split):
     """
     Custom loss function for position-only model.
 
-    The state vector contains: [x, y, θ, feedback_speed, feedback_steer, u_speed, u_steer]
-    We care about position (x, y) and orientation (θ) accuracy.
+    The state vector contains: [x, y, cos(θ), sin(θ), feedback_speed, feedback_steer, u_speed, u_steer]
+    We care about position (x, y) and orientation (cos(θ), sin(θ)) accuracy.
 
     Args:
         target: Ground truth state [batch, timesteps, state_dim]
         target_hat: Predicted state [batch, timesteps, state_dim]
         split: List of dimensions for splitting state vector
-               [xdim=2, thetadim=1, feedback_speed_dim=1, feedback_steer_dim=1, udim=2]
+               [xdim=2, thetadim=2, feedback_speed_dim=1, feedback_steer_dim=1, udim=2]
 
     Returns:
         loss: Combined loss value
@@ -50,10 +49,32 @@ def position_only_loss(target, target_hat, split):
     x_hat = x_hat.flatten(start_dim=0, end_dim=1)
     x_loss = (x - x_hat).pow(2).mean()
 
-    # Angle loss with wrapping to [-π, π] using utils.normalize_theta
-    theta = theta.flatten(start_dim=0, end_dim=1)
-    theta_hat = theta_hat.flatten(start_dim=0, end_dim=1)
-    angle_diff = normalize_theta(theta - theta_hat)
+    # Orientation loss with cos/sin representation
+    # theta now has shape [..., 2] where theta[..., 0] = cos(θ) and theta[..., 1] = sin(θ)
+    theta = theta.flatten(start_dim=0, end_dim=1)  # [N, 2]
+    theta_hat = theta_hat.flatten(start_dim=0, end_dim=1)  # [N, 2]
+
+    # Compute angle difference using cos(a - b) = cos(a)cos(b) + sin(a)sin(b)
+    cos_theta = theta[:, 0]  # [N]
+    sin_theta = theta[:, 1]  # [N]
+    cos_theta_hat = theta_hat[:, 0]  # [N]
+    sin_theta_hat = theta_hat[:, 1]  # [N]
+    # Normalize to ensure unit length (safety check)
+    norm_theta = torch.sqrt(cos_theta.pow(2) + sin_theta.pow(2)) + 1e-8
+    norm_theta_hat = torch.sqrt(cos_theta_hat.pow(2) + sin_theta_hat.pow(2)) + 1e-8
+    cos_theta = cos_theta / norm_theta
+    sin_theta = sin_theta / norm_theta
+    cos_theta_hat = cos_theta_hat / norm_theta_hat
+    sin_theta_hat = sin_theta_hat / norm_theta_hat
+
+    # cos(theta_diff) = cos(theta - theta_hat)
+    cos_diff = cos_theta * cos_theta_hat + sin_theta * sin_theta_hat  # [N]
+
+    # Clamp to avoid numerical issues with arccos
+    cos_diff = torch.clamp(cos_diff, -1.0, 1.0)
+
+    # angle_diff = arccos(cos_diff)
+    angle_diff = torch.acos(cos_diff) # [N], always positive in [0, pi]
     theta_loss = angle_diff.pow(2).mean()
 
     # Combined loss
@@ -68,7 +89,7 @@ def data_load(args):
 
     Expected data format:
     - Tensor shape: [data_size, num_steps + past_history, state_dim]
-    - state_dim = 7 for position-only model: [x, y, θ, feedback_speed, feedback_steer, u_speed, u_steer]
+    - state_dim = 8 for position-only model: [x, y, cos(θ), sin(θ), feedback_speed, feedback_steer, u_speed, u_steer]
 
     Args:
         args: Command line arguments containing data paths and parameters
@@ -81,11 +102,13 @@ def data_load(args):
 
     if args.custom_data_path:
         print(f"Loading custom data: {args.custom_data_path}")
-        custom_data = torch.load(args.custom_data_path)[100:600, :, :]  # Use a subset for training/testing
+        custom_data = torch.load(args.custom_data_path)[1080:, :, :]  # Use a subset for training/testing
+        print("Custom data loaded successfully.")
+        print("max in each state dimension:", torch.max(custom_data, dim=0).values.max(dim=0).values)
 
         # Validate data shape
         print(f"Data shape: {custom_data.shape}")
-        expected_state_dim = 7  # [x, y, θ, feedback_speed, feedback_steer, u_speed, u_steer]
+        expected_state_dim = 8  # [x, y, cos(θ), sin(θ), feedback_speed, feedback_steer, u_speed, u_steer]
         if custom_data.shape[2] != expected_state_dim:
             print(f"Warning: Expected state_dim={expected_state_dim}, got {custom_data.shape[2]}")
 
@@ -278,14 +301,18 @@ def train(args, train_data, val_data):
             # Also compute final timestep metrics for monitoring
             val_pos = val_hat[:, -1, :2]  # [batch, 2] - final (x, y)
             gt_pos = val_data[:, -1, :2]
-            val_angle = val_hat[:, -1, 2:3]  # [batch, 1] - final θ
-            gt_angle = val_data[:, -1, 2:3]
+
+            # Extract cos/sin for angle monitoring
+            val_cos_sin = val_hat[:, -1, 2:4]  # [batch, 2] - final (cos(θ), sin(θ))
+            gt_cos_sin = val_data[:, -1, 2:4]  # [batch, 2]
 
             # Position RMSE (final timestep only, for monitoring)
             pos_rmse = (val_pos - gt_pos).pow(2).sum(dim=1).mean().sqrt()
 
-            # Angle error with wrapping using utils.normalize_theta
-            angle_diff = normalize_theta(val_angle - gt_angle).squeeze()
+            # Angle error using cos(a - b) = cos(a)cos(b) + sin(a)sin(b)
+            cos_diff = val_cos_sin[:, 0] * gt_cos_sin[:, 0] + val_cos_sin[:, 1] * gt_cos_sin[:, 1]  # [batch]
+            cos_diff = torch.clamp(cos_diff, -1.0, 1.0)  # Clamp for numerical stability
+            angle_diff = torch.acos(cos_diff)  # [batch], always positive in [0, pi]
             angle_rmse = angle_diff.pow(2).mean().sqrt()
 
             # Use full trajectory loss as validation error

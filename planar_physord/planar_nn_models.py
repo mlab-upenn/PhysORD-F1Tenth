@@ -11,18 +11,25 @@ class ForceMLP(nn.Module):
     Neural network for external forces and torque in 2D planar motion.
     Outputs: [fx, fy, tau_z] - 2D force vector + scalar torque about z-axis
     """
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, hidden_size, output_size, output_scale=10.0):
         super(ForceMLP, self).__init__()
         self.layers = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.ELU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ELU(),
-            nn.Linear(hidden_size, output_size)
+            nn.Linear(hidden_size, output_size),
         )
 
+        # Initialize weights using orthogonal initialization
+        for m in self.layers:
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight)
+                nn.init.zeros_(m.bias)
+
     def forward(self, x):
-        return self.layers(x)
+        y = self.layers(x)
+        return y
 
 def FixedMass(m_dim, eps, param_value=0):
     """

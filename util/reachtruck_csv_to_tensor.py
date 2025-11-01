@@ -24,11 +24,11 @@ def arrange_data_sample(x, num_points=21, sample_intervals=1):
 def process_csv_to_state_tensor(csv_file, timesteps=20, past_history_input=2):
     """
     Convert a single reachtruck CSV file to position-only state tensor format.
-    Returns tensor of shape (num_sequences, timesteps + past_history_input, 7) or None if insufficient data.
+    Returns tensor of shape (num_sequences, timesteps + past_history_input, 8) or None if insufficient data.
 
-    7 features (for position_only_train.py):
+    8 features (for position_only_train.py):
     - 2: position (x, y)
-    - 1: angle (yaw from quaternion)
+    - 2: orientation (cos(theta), sin(theta))
     - 2: feedback (measured_speed, measured_steer_angle)
     - 2: control inputs (cmd_speed, cmd_steer_angle)
 
@@ -65,10 +65,15 @@ def process_csv_to_state_tensor(csv_file, timesteps=20, past_history_input=2):
         euler = rot.as_euler('xyz', degrees=False)  # Shape: (N, 3) - roll, pitch, yaw
         yaw = euler[:, 2].reshape(-1, 1)  # Shape: (N, 1) - extract yaw angle
 
-        # Combine all features: pos(2) + yaw(1) + feedback(2) + controls(2) = 7
+        # Compute cos(theta) and sin(theta) instead of theta directly
+        cos_theta = np.cos(yaw)  # Shape: (N, 1)
+        sin_theta = np.sin(yaw)  # Shape: (N, 1)
+
+        # Combine all features: pos(2) + orientation(2) + feedback(2) + controls(2) = 8
         state = np.concatenate([
             position,         # 2 features: x, y
-            yaw,             # 1 feature: yaw angle
+            cos_theta,       # 1 feature: cos(theta)
+            sin_theta,       # 1 feature: sin(theta)
             feedback_speed,  # 1 feature: measured_speed
             feedback_steer,  # 1 feature: measured_steer_angle
             cmd_speed,       # 1 feature: cmd_speed
@@ -97,7 +102,7 @@ def process_csv_to_state_tensor(csv_file, timesteps=20, past_history_input=2):
         state_filtered = state[valid_indices]
 
         # Create sequences of length (timesteps + past_history_input)
-        sequences = arrange_data_sample(state_filtered, sequence_length) # Shape: (num_sequences, sequence_length, 7)
+        sequences = arrange_data_sample(state_filtered, sequence_length) # Shape: (num_sequences, sequence_length, 8)
 
         if sequences.shape[0] == 0:
             print(f"Skipping {csv_file}: no valid sequences generated")
@@ -138,7 +143,7 @@ def filter_csv_files_by_pattern(csv_files, pattern):
 def process_all_csvs_to_tensor(csv_dir, output_path, timesteps=20, past_history_input=2, include_pattern='*'):
     """
     Process selected CSV files in directory and create a single tensor.
-    Final tensor shape: (data_size, timesteps + past_history_input, 7)
+    Final tensor shape: (data_size, timesteps + past_history_input, 8)
 
     Args:
         csv_dir: Directory containing CSV files
@@ -180,7 +185,7 @@ def process_all_csvs_to_tensor(csv_dir, output_path, timesteps=20, past_history_
         raise ValueError("No valid sequences generated from any CSV files")
 
     # Concatenate all sequences along the sequence dimension
-    combined_sequences = torch.cat(all_sequences, dim=0)  # Shape: (data_size, timesteps + past_history_input, 7)
+    combined_sequences = torch.cat(all_sequences, dim=0)  # Shape: (data_size, timesteps + past_history_input, 8)
 
     print(f"\nFinal tensor shape: {combined_sequences.shape}")
     print(f"Total sequences (data_size): {total_sequences}")
@@ -259,14 +264,14 @@ Examples:
     print(f"Expected format: [data_size, num_steps, state_dim]")
     print(f"  data_size: {tensor.shape[0]}")
     print(f"  num_steps: {tensor.shape[1]} (timesteps={timesteps} + past_history={past_history_input})")
-    print(f"  state_dim: {tensor.shape[2]} = [x(1), y(1), yaw(1), feedback_speed(1), feedback_steer(1), cmd_speed(1), cmd_steer(1)]")
+    print(f"  state_dim: {tensor.shape[2]} = [x(1), y(1), cos_theta(1), sin_theta(1), feedback_speed(1), feedback_steer(1), cmd_speed(1), cmd_steer(1)]")
 
     # Verify the structure
     print("\nTensor verification (first trajectory, first timestep):")
     print(f"  Position (x, y): {tensor[0, 0, :2]}")
-    print(f"  Yaw angle: {tensor[0, 0, 2]:.4f} rad")
-    print(f"  Feedback (speed, steer): {tensor[0, 0, 3:5]}")
-    print(f"  Control (cmd_speed, cmd_steer): {tensor[0, 0, 5:7]}")
+    print(f"  Orientation (cos, sin): {tensor[0, 0, 2:4]}")
+    print(f"  Feedback (speed, steer): {tensor[0, 0, 4:6]}")
+    print(f"  Control (cmd_speed, cmd_steer): {tensor[0, 0, 6:8]}")
 
     print("\n" + "=" * 70)
     print("To use this tensor with position_only_train.py:")
