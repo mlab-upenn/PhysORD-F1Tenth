@@ -41,20 +41,20 @@ def compute_trajectory_errors(gt_data: torch.Tensor, pred_data: torch.Tensor) ->
 
     for i in range(batch_size):
         # Position error (x, y)
-        gt_pos = gt_np[i, :, :2]
-        pred_pos = pred_np[i, :, :2]
+        gt_pos = gt_np[i, -1:, :2]
+        pred_pos = pred_np[i, -1:, :2]
         pos_error = np.mean(np.linalg.norm(gt_pos - pred_pos, axis=1))
 
         # Angle error (theta)
-        gt_theta = gt_np[i, :, 2:3]
-        pred_theta = pred_np[i, :, 2:3]
+        gt_theta = gt_np[i, -1:, 2:3]
+        pred_theta = pred_np[i, -1:, 2:3]
         angle_diff = gt_theta - pred_theta
         # Normalize angle difference to [-pi, pi]
         angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
         angle_error = np.mean(np.abs(angle_diff))
 
         # Combined error (weighted sum)
-        errors[i] = pos_error + 0.5 * angle_error
+        errors[i] = (pos_error + angle_error)
 
     return errors
 
@@ -311,6 +311,10 @@ if __name__ == "__main__":
                        help='Use feedback measurements (default: True)')
     parser.add_argument('--no_feedback', action='store_false', dest='use_feedback',
                        help='Disable feedback measurements')
+    parser.add_argument('--relative_coords', action='store_true', default=True,
+                       help='Convert x, y, and theta to relative coordinates in force model (default: True)')
+    parser.add_argument('--no_relative_coords', action='store_false', dest='relative_coords',
+                       help='Use absolute coordinates in force model')
 
     # Output configuration
     parser.add_argument('--save_dir', type=str, default='./plots/',
@@ -349,7 +353,8 @@ if __name__ == "__main__":
         time_step=args.time_step,
         past_history_input=args.past_history_input,
         hidden_size=args.hidden_size,
-        use_feedback=args.use_feedback
+        use_feedback=args.use_feedback,
+        relative_coords=args.relative_coords
     ).to(device)
 
     model.load_state_dict(torch.load(args.model_path, map_location=device))
@@ -359,7 +364,7 @@ if __name__ == "__main__":
     # Load test data
     print(f"Loading test data from: {args.test_data}")
     test_data = torch.load(args.test_data, map_location=device)
-    test_data = test_data[1080:3100, :, :]
+    test_data = test_data[:, :, :]
 
     # Handle different data formats
     if isinstance(test_data, dict):
