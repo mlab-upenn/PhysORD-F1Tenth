@@ -23,6 +23,7 @@ class PositionOnlyForceModelHelper(torch.nn.Module):
             feedback_speed_dim=1,
             feedback_steer_dim=1,
             hidden_size=128,
+            relative_coords=True,
         ):
         """
         Args:
@@ -33,6 +34,7 @@ class PositionOnlyForceModelHelper(torch.nn.Module):
             feedback_speed_dim: Dimension of feedback speed measurement (default 1 for planar)
             feedback_steer_dim: Dimension of feedback steering measurement (default 1 for planar)
             hidden_size: Hidden layer size for the force model MLP
+            relative_coords: Whether to convert x, y, and theta to relative coordinates (default True)
         """
         super(PositionOnlyForceModelHelper, self).__init__()
         self.use_feedback = use_feedback
@@ -41,6 +43,7 @@ class PositionOnlyForceModelHelper(torch.nn.Module):
         self.posedim = pose_dim
         self.feedback_speed_dim = feedback_speed_dim
         self.feedback_steer_dim = feedback_steer_dim
+        self.relative_coords = relative_coords
 
         input_dim = (
             pose_dim
@@ -75,58 +78,72 @@ class PositionOnlyForceModelHelper(torch.nn.Module):
         assert past_history_input_size == self.past_history_input, \
             f"Expected past_history_input_size {self.past_history_input}, got {past_history_input_size}"
 
-        # Don't pass absolute pose information, treat the latest pose as origin with zero orientation
-        # Reposition + reorient all past poses relative to the latest pose
-        initial_xy = x[:, -1, 0:2]  # [bs, 2]
-        initial_cos_theta = x[:, -1, 2]  # [bs]
-        initial_sin_theta = x[:, -1, 3]  # [bs]
+        if self.relative_coords:
+            # Don't pass absolute pose information, treat the latest pose as origin with zero orientation
+            # Reposition + reorient all past poses relative to the latest pose
+            initial_xy = x[:, -1, 0:2]  # [bs, 2]
+            initial_cos_theta = x[:, -1, 2]  # [bs]
+            initial_sin_theta = x[:, -1, 3]  # [bs]
 
-        # Build rotation matrix R_k for current orientation (body to world frame)
-        R_k = torch.zeros(bs, 2, 2, device=x.device, dtype=x.dtype)  # [bs, 2, 2]
-        R_k[:, 0, 0] = initial_cos_theta
-        R_k[:, 0, 1] = -initial_sin_theta
-        R_k[:, 1, 0] = initial_sin_theta
-        R_k[:, 1, 1] = initial_cos_theta
+            # Build rotation matrix R_k for current orientation (body to world frame)
+            R_k = torch.zeros(bs, 2, 2, device=x.device, dtype=x.dtype)  # [bs, 2, 2]
+            R_k[:, 0, 0] = initial_cos_theta
+            R_k[:, 0, 1] = -initial_sin_theta
+            R_k[:, 1, 0] = initial_sin_theta
+            R_k[:, 1, 1] = initial_cos_theta
 
-        # Transform positions to relative coordinates in body frame (avoid in-place)
-        xy_relative = x[:, :, 0:2] - initial_xy.unsqueeze(1)  # [bs, past_history_input_size, 2]
-        # Rotate xy_relative into body frame: xy_body = R_k^T * (xy_relative) in col vector form
-        # but we have row vectors, so do xy_body = (xy_relative) * R_k.
-        # So, in bmm form: xy_body = bmm(xy_relative, R_k)
-        xy_body = torch.bmm(xy_relative, R_k)  # [bs, past_history_input_size, 2]
+            # Transform positions to relative coordinates in body frame (avoid in-place)
+            xy_relative = x[:, :, 0:2] - initial_xy.unsqueeze(1)  # [bs, past_history_input_size, 2]
+            # Rotate xy_relative into body frame: xy_body = R_k^T * (xy_relative) in col vector form
+            # but we have row vectors, so do xy_body = (xy_relative) * R_k.
+            # So, in bmm form: xy_body = bmm(xy_relative, R_k)
+            xy_body = torch.bmm(xy_relative, R_k)  # [bs, past_history_input_size, 2]
 
-        # Transform orientations to relative using rotation matrices (avoid in-place)
-        # For each timestep, compute R_relative = R_k^T * R_i
-        cos_theta = x[:, :, 2]  # [bs, past_history_input_size]
-        sin_theta = x[:, :, 3]  # [bs, past_history_input_size]
+            # Transform orientations to relative using rotation matrices (avoid in-place)
+            # For each timestep, compute R_relative = R_k^T * R_i
+            cos_theta = x[:, :, 2]  # [bs, past_history_input_size]
+            sin_theta = x[:, :, 3]  # [bs, past_history_input_size]
 
-        # Compute relative cos and sin: R_relative = R_k^T * R_i
-        # cos(theta_rel) = cos(theta_k)*cos(theta_i) + sin(theta_k)*sin(theta_i)
-        # sin(theta_rel) = -sin(theta_k)*cos(theta_i) + cos(theta_k)*sin(theta_i)
-        cos_theta_rel = initial_cos_theta.unsqueeze(1) * cos_theta + initial_sin_theta.unsqueeze(1) * sin_theta
-        sin_theta_rel = -initial_sin_theta.unsqueeze(1) * cos_theta + initial_cos_theta.unsqueeze(1) * sin_theta
+            # Compute relative cos and sin: R_relative = R_k^T * R_i
+            # cos(theta_rel) = cos(theta_k)*cos(theta_i) + sin(theta_k)*sin(theta_i)
+            # sin(theta_rel) = -sin(theta_k)*cos(theta_i) + cos(theta_k)*sin(theta_i)
+            cos_theta_rel = initial_cos_theta.unsqueeze(1) * cos_theta + initial_sin_theta.unsqueeze(1) * sin_theta
+            sin_theta_rel = -initial_sin_theta.unsqueeze(1) * cos_theta + initial_cos_theta.unsqueeze(1) * sin_theta
 
-        # Construct x_transformed with transformed pose values (no in-place modification)
-        if self.use_feedback:
-            # Concatenate: xy_body, cos_theta_rel, sin_theta_rel, feedback, control
-            x_transformed = torch.cat([
-                xy_body,
-                cos_theta_rel.unsqueeze(2),
-                sin_theta_rel.unsqueeze(2),
-                x[:, :, 4:6],  # feedback
-                x[:, :, 6:8]   # control
-            ], dim=2)
-            x_flat = x_transformed.reshape(bs, -1)  # flatten past history inputs
+            # Construct x_transformed with transformed pose values (no in-place modification)
+            if self.use_feedback:
+                # Concatenate: xy_body, cos_theta_rel, sin_theta_rel, feedback, control
+                x_transformed = torch.cat([
+                    xy_body,
+                    cos_theta_rel.unsqueeze(2),
+                    sin_theta_rel.unsqueeze(2),
+                    x[:, :, 4:6],  # feedback
+                    x[:, :, 6:8]   # control
+                ], dim=2)
+                x_flat = x_transformed.reshape(bs, -1)  # flatten past history inputs
+            else:
+                # Use only pose information and control inputs
+                x_pose_transformed = torch.cat([
+                    xy_body,
+                    cos_theta_rel.unsqueeze(2),
+                    sin_theta_rel.unsqueeze(2)
+                ], dim=2)  # [bs, past_history_input_size, 4]
+                u = x[:, :, 6:8]  # [bs, past_history_input_size, udim]
+                x_selected = torch.cat((x_pose_transformed, u), dim=2)
+                x_flat = x_selected.reshape(bs, -1)  # flatten past history inputs
         else:
-            # Use only pose information and control inputs
-            x_pose_transformed = torch.cat([
-                xy_body,
-                cos_theta_rel.unsqueeze(2),
-                sin_theta_rel.unsqueeze(2)
-            ], dim=2)  # [bs, past_history_input_size, 4]
-            u = x[:, :, 6:8]  # [bs, past_history_input_size, udim]
-            x_selected = torch.cat((x_pose_transformed, u), dim=2)
-            x_flat = x_selected.reshape(bs, -1)  # flatten past history inputs
+            # Use absolute coordinates
+            if self.use_feedback:
+                # Use all state information: pose, feedback, control
+                x_flat = x.reshape(bs, -1)  # flatten past history inputs
+            else:
+                # Use only pose information and control inputs
+                xy = x[:, :, 0:2]  # [bs, past_history_input_size, 2]
+                cos_theta = x[:, :, 2:3]  # [bs, past_history_input_size, 1]
+                sin_theta = x[:, :, 3:4]  # [bs, past_history_input_size, 1]
+                u = x[:, :, 6:8]  # [bs, past_history_input_size, udim]
+                x_selected = torch.cat((xy, cos_theta, sin_theta, u), dim=2)
+                x_flat = x_selected.reshape(bs, -1)  # flatten past history inputs
 
         force_output = self.force_model(x_flat)  # [bs, 3]
 
@@ -154,6 +171,7 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
             past_history_input=2,
             hidden_size=64,
             use_feedback=True,
+            relative_coords=True,
         ):
         super(PlanarPositionOnlyPhysORD, self).__init__()
         self.device = device
@@ -178,6 +196,7 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
             feedback_speed_dim=self.feedback_speed_dim,
             feedback_steer_dim=self.feedback_steer_dim,
             hidden_size=hidden_size,
+            relative_coords=relative_coords,
         )
 
     def compute_cos_sin_update(self, R_k, R_k_m_1, tau_z):
@@ -299,7 +318,7 @@ class PlanarPositionOnlyPhysORD(torch.nn.Module):
             xy_k_m_1 = xy[:, -2, :].unsqueeze(1)  # [bs, 1, 2]
             xy_k_p_1 = (
                 2 * xy_k - xy_k_m_1
-                + (self.h ** 2) * fxy_world.unsqueeze(1)  # [bs, 1, 2]
+                + 0.5 * (self.h ** 2) * fxy_world.unsqueeze(1)  # [bs, 1, 2]
             ) # assuming that predicted by neural net is force / mass.
 
             # Update orientation using the helper function

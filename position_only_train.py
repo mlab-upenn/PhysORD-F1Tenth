@@ -102,7 +102,7 @@ def data_load(args):
 
     if args.custom_data_path:
         print(f"Loading custom data: {args.custom_data_path}")
-        custom_data = torch.load(args.custom_data_path)[1080:, :, :]  # Use a subset for training/testing
+        custom_data = torch.load(args.custom_data_path)[:, :, :]  # Use a subset for training/testing
         print("Custom data loaded successfully.")
         print("max in each state dimension:", torch.max(custom_data, dim=0).values.max(dim=0).values)
 
@@ -180,7 +180,8 @@ def train(args, train_data, val_data):
         time_step=args.time_step,
         past_history_input=args.past_history_input,
         hidden_size=args.hidden_size,
-        use_feedback=args.use_feedback
+        use_feedback=args.use_feedback,
+        relative_coords=args.relative_coords
     ).to(device)
 
     if args.pretrained is not None:
@@ -201,6 +202,7 @@ def train(args, train_data, val_data):
     print(f"  Past history input: {args.past_history_input}")
     print(f"  Hidden size: {args.hidden_size}")
     print(f"  Use feedback: {args.use_feedback}")
+    print(f"  Relative coords: {args.relative_coords}")
 
     # Training statistics
     stats = {
@@ -253,7 +255,7 @@ def train(args, train_data, val_data):
                 target_hat,
                 split=[model.xdim, model.thetadim, model.feedback_speed_dim,
                        model.feedback_steer_dim, model.udim]
-            )
+            ) * args.timesteps  # Scale by number of timesteps
 
             # Check for NaN/Inf in loss
             if torch.isnan(train_loss_mini) or torch.isinf(train_loss_mini):
@@ -296,7 +298,7 @@ def train(args, train_data, val_data):
                 val_target_hat,
                 split=[model.xdim, model.thetadim, model.feedback_speed_dim,
                        model.feedback_steer_dim, model.udim]
-            )
+            ) * args.timesteps  # Scale by number of timesteps
 
             # Also compute final timestep metrics for monitoring
             val_pos = val_hat[:, -1, :2]  # [batch, 2] - final (x, y)
@@ -448,6 +450,10 @@ if __name__ == "__main__":
                        help='Use feedback measurements in the force model (default: True)')
     parser.add_argument('--no_feedback', action='store_false', dest='use_feedback',
                        help='Disable feedback measurements in the force model')
+    parser.add_argument('--relative_coords', action='store_true', default=True,
+                       help='Convert x, y, and theta to relative coordinates in force model (default: True)')
+    parser.add_argument('--no_relative_coords', action='store_false', dest='relative_coords',
+                       help='Use absolute coordinates in force model')
     parser.add_argument('--pretrained', default=None, type=str,
                        help='Path to pretrained model weights')
 
