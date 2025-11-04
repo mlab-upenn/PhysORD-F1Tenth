@@ -92,7 +92,7 @@ def process_csv_to_state_tensor(csv_file, timesteps=20, past_history_input=2):
         vel_magnitudes = np.concatenate([[0], vel_magnitudes])
 
         # Filter out sequences with low velocity (< 0.1 m/s for reachtruck)
-        valid_indices = vel_magnitudes >= 0.1
+        valid_indices = vel_magnitudes >= 0.0
         print(vel_magnitudes)
 
         if np.sum(valid_indices) < sequence_length:

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Filter reachtruck CSV files by splitting them when timestamp gaps exceed 0.25 seconds.
+Filter reachtruck CSV files by splitting them based on two criteria:
+1. Invalid speed conditions: When measured_speed is 0.0 but cmd_speed is not 0.0
+   (removes those datapoints plus 10 before and 10 after)
+2. Timestamp gaps exceeding 0.25 seconds
 
 Usage:
     python filter_reachtruck_csvs.py <input_folder> <output_folder>
@@ -9,8 +12,13 @@ Args:
     input_folder: Directory containing unfiltered CSV files
     output_folder: Directory where filtered CSV files will be created
 
-The script will split CSV files at points where consecutive timestamps differ by more than 0.25 seconds.
-If a CSV has n splits, it will produce n+1 output files.
+The script will:
+1. First remove continuous intervals where measured_speed=0.0 but cmd_speed!=0.0,
+   along with 10 datapoints before and after each such interval
+2. Then split the resulting segments when consecutive timestamps differ by more than 0.25 seconds
+3. Skip segments with less than 45 rows
+
+This can produce multiple output files from a single input CSV.
 """
 
 import argparse
@@ -19,9 +27,86 @@ from pathlib import Path
 import pandas as pd
 
 
+def identify_invalid_speed_indices(df: pd.DataFrame, context_window: int = 20):
+    """
+    Identify indices to remove where measured_speed is 0.0 but cmd_speed is not 0.0.
+    Also marks context_window datapoints before and after each such occurrence.
+
+    Args:
+        df: DataFrame with 'measured_speed' and 'cmd_speed' columns
+        context_window: Number of datapoints to remove before and after (default: 10)
+
+    Returns:
+        Set of indices to remove
+    """
+    indices_to_remove = set()
+
+    # Check if required columns exist
+    if 'measured_speed' not in df.columns or 'cmd_speed' not in df.columns:
+        return indices_to_remove
+
+    # Find rows where measured_speed is 0.0 but cmd_speed is not 0.0
+    invalid_mask = (df['measured_speed'] == 0.0) & (df['cmd_speed'] != 0.0)
+    invalid_indices = df.index[invalid_mask].tolist()
+
+    # For each invalid index, mark it and surrounding context
+    for idx in invalid_indices:
+        # Add the index itself
+        indices_to_remove.add(idx)
+
+        # Add previous context_window indices
+        for i in range(max(0, idx - context_window), idx):
+            indices_to_remove.add(i)
+
+        # Add next context_window indices
+        for i in range(idx + 1, min(len(df), idx + context_window + 1)):
+            indices_to_remove.add(i)
+
+    return indices_to_remove
+
+
+def split_dataframe_by_valid_indices(df: pd.DataFrame, indices_to_remove: set):
+    """
+    Split dataframe into segments by removing specified indices.
+
+    Args:
+        df: Input dataframe
+        indices_to_remove: Set of indices to remove
+
+    Returns:
+        List of dataframe segments
+    """
+    if not indices_to_remove:
+        return [df]
+
+    # Create a mask for valid rows
+    valid_mask = ~df.index.isin(indices_to_remove)
+
+    # Find groups of consecutive True values
+    segments = []
+    start_idx = None
+
+    for i, is_valid in enumerate(valid_mask):
+        if is_valid and start_idx is None:
+            # Start of a new segment
+            start_idx = i
+        elif not is_valid and start_idx is not None:
+            # End of a segment
+            segments.append(df.iloc[start_idx:i])
+            start_idx = None
+
+    # Add the last segment if it exists
+    if start_idx is not None:
+        segments.append(df.iloc[start_idx:])
+
+    return segments if segments else []
+
+
 def filter_csv(input_file: Path, output_folder: Path, max_time_gap: float = 0.25):
     """
-    Filter a single CSV file by splitting it based on timestamp gaps.
+    Filter a single CSV file by splitting it based on:
+    1. Invalid speed intervals (measured_speed=0 but cmd_speed!=0)
+    2. Timestamp gaps
 
     Args:
         input_file: Path to the input CSV file
@@ -42,29 +127,46 @@ def filter_csv(input_file: Path, output_folder: Path, max_time_gap: float = 0.25
         print(f"Warning: {input_file.name} does not have a 'timestamp' column, skipping.")
         return 0
 
-    # Calculate time differences between consecutive rows
-    time_diffs = df['timestamp'].diff()
+    # Step 1: Filter out invalid speed intervals
+    indices_to_remove = identify_invalid_speed_indices(df, context_window=20)
 
-    # Find indices where the time gap exceeds the threshold
-    split_indices = time_diffs[time_diffs > max_time_gap].index.tolist()
+    if indices_to_remove:
+        print(f"  Found {len(indices_to_remove)} datapoints to remove due to invalid speed conditions")
+        initial_segments = split_dataframe_by_valid_indices(df, indices_to_remove)
+    else:
+        initial_segments = [df]
 
-    # Create segments based on split points
+    # Step 2: Apply timestamp gap filtering to each segment
     segments = []
-    start_idx = 0
+    for segment in initial_segments:
+        if len(segment) == 0:
+            continue
 
-    for split_idx in split_indices:
-        # Add segment from start_idx to split_idx (exclusive)
-        if start_idx < split_idx:
-            segments.append(df.iloc[start_idx:split_idx])
-        start_idx = split_idx
+        # Reset index for proper indexing
+        segment = segment.reset_index(drop=True)
 
-    # Add the last segment
-    if start_idx < len(df):
-        segments.append(df.iloc[start_idx:])
+        # Calculate time differences between consecutive rows
+        time_diffs = segment['timestamp'].diff()
 
-    # If no splits were found, add the entire dataframe as one segment
+        # Find indices where the time gap exceeds the threshold
+        split_indices = time_diffs[time_diffs > max_time_gap].index.tolist()
+
+        # Create sub-segments based on split points
+        start_idx = 0
+        for split_idx in split_indices:
+            # Add segment from start_idx to split_idx (exclusive)
+            if start_idx < split_idx:
+                segments.append(segment.iloc[start_idx:split_idx])
+            start_idx = split_idx
+
+        # Add the last sub-segment
+        if start_idx < len(segment):
+            segments.append(segment.iloc[start_idx:])
+
+    # If no segments were created, something went wrong
     if not segments:
-        segments.append(df)
+        print(f"Warning: No valid segments after filtering {input_file.name}")
+        return 0
 
     # Write each segment to a separate file
     base_name = input_file.stem  # filename without extension
@@ -107,7 +209,7 @@ def filter_csv(input_file: Path, output_folder: Path, max_time_gap: float = 0.25
 def main():
     """Main function to process all CSV files in the input folder."""
     parser = argparse.ArgumentParser(
-        description='Filter reachtruck CSV files by splitting on timestamp gaps > 0.25s'
+        description='Filter reachtruck CSV files by removing invalid speed intervals and splitting on timestamp gaps'
     )
     parser.add_argument(
         'input_folder',
@@ -122,8 +224,8 @@ def main():
     parser.add_argument(
         '--max-gap',
         type=float,
-        default=0.25,
-        help='Maximum allowed time gap in seconds (default: 0.25)'
+        default=0.2,
+        help='Maximum allowed time gap in seconds (default: 0.2)'
     )
 
     args = parser.parse_args()
